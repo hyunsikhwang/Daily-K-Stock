@@ -162,14 +162,15 @@ export default function App() {
   const [krxError, setKrxError] = useState<string | null>(null);
   const [lastUpdate, setLastUpdate] = useState<Date>(new Date());
   const [isLoading, setIsLoading] = useState(true);
+  const [targetDate, setTargetDate] = useState<Date>(toZonedTime(new Date(), KST_TZ));
 
-  const fetchData = async () => {
+  const fetchData = async (dateToUse: Date = targetDate) => {
     setIsLoading(true);
     setKrxError(null);
-    const seoulTime = toZonedTime(new Date(), KST_TZ);
+    const baseDate = toZonedTime(dateToUse, KST_TZ);
     const dateCandidates: string[] = [];
     for (let i = 0; i < 11; i++) {
-      dateCandidates.push(format(subDays(seoulTime, i), 'yyyyMMdd'));
+      dateCandidates.push(format(subDays(baseDate, i), 'yyyyMMdd'));
     }
 
     // Naver data fetching with date fallback
@@ -269,10 +270,19 @@ export default function App() {
   };
 
   useEffect(() => {
-    fetchData();
-    const interval = setInterval(fetchData, 60000); // 1 minute polling
-    return () => clearInterval(interval);
-  }, []);
+    fetchData(targetDate);
+    // Only set interval for the current day to avoid unnecessary polling for past data
+    const isToday = format(targetDate, 'yyyy-MM-dd') === format(toZonedTime(new Date(), KST_TZ), 'yyyy-MM-dd');
+    
+    let interval: any;
+    if (isToday) {
+      interval = setInterval(() => fetchData(targetDate), 60000);
+    }
+    
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [targetDate]);
 
   // Process data for charts
   const chartData = useMemo(() => {
@@ -381,9 +391,22 @@ export default function App() {
           <div className="space-y-8">
             <div>
               <label className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-3 block">Reporting Period</label>
-              <div className="bg-gray-50 border border-gray-200 rounded-lg px-3 py-2.5 flex items-center gap-2 text-sm font-medium text-gray-700 shadow-sm">
-                <Calendar size={16} className="text-gray-400" />
-                {naverDate ? `${naverDate.substring(0, 4)}-${naverDate.substring(4, 6)}-${naverDate.substring(6, 8)}` : getKSTDateStr()} (KST)
+              <div className="space-y-3">
+                <input 
+                  type="date"
+                  value={format(targetDate, 'yyyy-MM-dd')}
+                  onChange={(e) => {
+                    const newDate = new Date(e.target.value);
+                    if (!isNaN(newDate.getTime())) {
+                      setTargetDate(newDate);
+                    }
+                  }}
+                  className="w-full bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 text-sm font-medium text-gray-700 shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all"
+                />
+                <div className="bg-blue-50/50 border border-blue-100 rounded-lg px-3 py-2.5 flex items-center gap-2 text-[11px] font-bold text-blue-700 shadow-sm">
+                  <Clock size={14} className="text-blue-400" />
+                  {naverDate ? `${naverDate.substring(0, 4)}-${naverDate.substring(4, 6)}-${naverDate.substring(6, 8)}` : 'No Data'} (Actual)
+                </div>
               </div>
             </div>
 
