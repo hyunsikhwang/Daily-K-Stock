@@ -11,6 +11,16 @@ export interface StockData {
   changeRate: string;
 }
 
+export interface MarketStockItem {
+  itemCode: string;
+  stockName: string;
+  closePrice: string;
+  compareToPreviousClosePrice: string;
+  fluctuationsRatio: string;
+  marketValueAmount: string; // usually represented in '억' (100M KRW)
+  sosok?: string;            // '0' or '001' is KOSPI, '1' or '002' is KOSDAQ
+}
+
 export interface KRXRow {
   PROD_NM?: string;
   MKT_NM?: string;
@@ -57,4 +67,14 @@ export const getKSTDateStr = (date: Date = new Date()) => {
 export const getKSTTimeStr = (date: Date = new Date()) => {
   const kstDate = toZonedTime(date, KST_TZ);
   return format(kstDate, 'HH:mm:ss');
+};
+
+export const fetchNaverMarketStocks = async (): Promise<any> => {
+  try {
+    const response = await axios.get('/api/stock/market');
+    return response.data;
+  } catch (error) {
+    console.error('Error fetching Naver market stock list:', error);
+    return null;
+  }
 };

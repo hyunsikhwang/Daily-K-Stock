@@ -1,20 +1,325 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { TrendingUp, TrendingDown, Clock, Calendar, RefreshCw, ChevronUp, ChevronDown, Minus } from 'lucide-react';
 import { 
-  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceDot, Legend
+  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceDot, Legend, Treemap
 } from 'recharts';
 import { format, isSaturday, isSunday, addDays, subDays, setHours, setMinutes, setSeconds, isBefore, isAfter, differenceInSeconds } from 'date-fns';
 import { toZonedTime } from 'date-fns-tz';
 
 import { 
-  fetchNaverIndexData, fetchKRXData, getKSTDateStr, StockData, KRXRow 
+  fetchNaverIndexData, fetchKRXData, getKSTDateStr, StockData, KRXRow, fetchNaverMarketStocks, MarketStockItem
 } from './stockService';
 import { cn, formatNumber, cleanValue, KOREAN_HOLIDAYS } from './lib/utils';
 
 const KST_TZ = 'Asia/Seoul';
 const KRX_OPEN = { hour: 9, minute: 0 };
 const KRX_CLOSE = { hour: 15, minute: 30 };
+
+// --- Helpers for Market Stocks (Treemap) ---
+const extractMarketStocks = (payload: any): any[] => {
+  if (Array.isArray(payload)) return payload;
+  if (typeof payload !== 'object' || payload === null) return [];
+
+  const keys = ["stocks", "output", "result", "data", "list"];
+  for (const key of keys) {
+    if (Array.isArray(payload[key])) return payload[key];
+    if (payload[key] && Array.isArray(payload[key].stocks)) return payload[key].stocks;
+  }
+
+  for (const key in payload) {
+    if (Array.isArray(payload[key])) return payload[key];
+    if (payload[key] && Array.isArray(payload[key].stocks)) return payload[key].stocks;
+  }
+  return [];
+};
+
+const normalizeStockItem = (item: any) => {
+  const code = item.itemcode || item.itemCode || item.code || item.symbol || '';
+  const name = item.itemname || item.itemName || item.name || '';
+  
+  const cleanNum = (val: any): number => {
+    if (val === undefined || val === null) return 0;
+    if (typeof val === 'number') return val;
+    const cleaned = String(val).replace(/,/g, '');
+    const num = parseFloat(cleaned);
+    return isNaN(num) ? 0 : num;
+  };
+
+  const closePrice = cleanNum(item.nowPrice || item.closePrice || item.nowVal || item.price);
+  
+  let changeValue = cleanNum(item.prevChangePrice || item.compareToPreviousClosePrice || item.changeVal || item.change);
+  let fluctuationsRatio = cleanNum(item.prevChangeRate || item.fluctuationsRatio || item.changeRate || item.rate);
+  
+  // Apply correct negative sign for declining stocks on Naver (upDownGb: 4 is 하한, 5 is 하락)
+  const upDownGb = String(item.upDownGb || '');
+  if (upDownGb === '4' || upDownGb === '5') {
+    changeValue = -Math.abs(changeValue);
+    fluctuationsRatio = -Math.abs(fluctuationsRatio);
+  }
+
+  let marketValueAmount = cleanNum(item.marketSum || item.marketValueAmount || item.marketCap);
+  if (marketValueAmount > 100000000) {
+    marketValueAmount = marketValueAmount / 100000000;
+  }
+  
+  const sosok = String(item.sosok !== undefined ? item.sosok : (item.marketType || item.market || ''));
+
+  return {
+    code,
+    name,
+    closePrice,
+    changeValue,
+    fluctuationsRatio,
+    marketValueAmount,
+    sosok
+  };
+};
+
+// --- Customized Treemap Component (Pure HTML5 & CSS Layout for Perfect White Font Color & Peak Speed) ---
+interface TreemapItem {
+  code: string;
+  name: string;
+  closePrice: number;
+  changeValue: number;
+  fluctuationsRatio: number;
+  marketValueAmount: number;
+  sosok: string;
+  value: number;
+}
+
+interface RectLayout {
+  item: TreemapItem;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+const computeTreemap = (
+  items: TreemapItem[],
+  x: number,
+  y: number,
+  width: number,
+  height: number
+): RectLayout[] => {
+  if (!items || items.length === 0) return [];
+  const layouts: RectLayout[] = [];
+
+  const divide = (
+    subItems: TreemapItem[],
+    rx: number,
+    ry: number,
+    rw: number,
+    rh: number
+  ) => {
+    if (subItems.length === 0) return;
+    if (subItems.length === 1) {
+      layouts.push({
+        item: subItems[0],
+        x: rx,
+        y: ry,
+        width: rw,
+        height: rh,
+      });
+      return;
+    }
+
+    // Split across the longer dimension to maintain stock block squareness
+    const splitHorizontally = rw < rh;
+
+    const totalWeight = subItems.reduce((sum, item) => sum + item.value, 0);
+    let cumulative = 0;
+    let splitIdx = 0;
+    let minDifference = totalWeight;
+
+    for (let i = 0; i < subItems.length - 1; i++) {
+      cumulative += subItems[i].value;
+      const remains = totalWeight - cumulative;
+      const diff = Math.abs(cumulative - remains);
+      if (diff < minDifference) {
+        minDifference = diff;
+        splitIdx = i;
+      }
+    }
+
+    const leftItems = subItems.slice(0, splitIdx + 1);
+    const rightItems = subItems.slice(splitIdx + 1);
+
+    const leftWeight = leftItems.reduce((sum, item) => sum + item.value, 0);
+    const ratio = totalWeight > 0 ? leftWeight / totalWeight : 0.5;
+
+    if (splitHorizontally) {
+      // Split vertically (y-axis)
+      const h1 = rh * ratio;
+      divide(leftItems, rx, ry, rw, h1);
+      divide(rightItems, rx, ry + h1, rw, rh - h1);
+    } else {
+      // Split horizontally (x-axis)
+      const w1 = rw * ratio;
+      divide(leftItems, rx, ry, w1, rh);
+      divide(rightItems, rx + w1, ry, rw - w1, rh);
+    }
+  };
+
+  divide(items, x, y, width, height);
+  return layouts;
+};
+
+const TreemapComponent = ({
+  data,
+  colorMode,
+  hoveredStockCode,
+  onHoverStock
+}: {
+  data: TreemapItem[];
+  colorMode: 'KR' | 'US';
+  hoveredStockCode: string | null;
+  onHoverStock: (stock: any | null) => void;
+}) => {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [dimensions, setDimensions] = useState({ width: 600, height: 430 });
+
+  useEffect(() => {
+    if (!containerRef.current) return;
+    const observer = new ResizeObserver((entries) => {
+      if (!entries || entries.length === 0) return;
+      const { width, height } = entries[0].contentRect;
+      setDimensions({
+        width: width || 600,
+        height: height || 430
+      });
+    });
+    observer.observe(containerRef.current);
+    return () => observer.disconnect();
+  }, []);
+
+  const rects = useMemo(() => {
+    if (!data || data.length === 0) return [];
+    const sortedData = [...data].sort((a, b) => b.value - a.value);
+    return computeTreemap(sortedData, 0, 0, dimensions.width, dimensions.height);
+  }, [data, dimensions]);
+
+  return (
+    <div ref={containerRef} className="w-full h-full relative select-none overflow-hidden rounded-lg" style={{ minHeight: '430px' }}>
+      {rects.map((rect, idx) => {
+        const { item, x, y, width, height } = rect;
+        const isHovered = item.code === hoveredStockCode;
+        const rate = item.fluctuationsRatio;
+        const isUp = rate > 0;
+        const isDown = rate < 0;
+        const absRate = Math.abs(rate);
+
+        let color = '#111319'; // flat gray-ish for flat or unchanged
+
+        if (colorMode === 'KR') {
+          if (isUp) {
+            if (absRate >= 5.0) color = '#e51c23'; // vibrant classic red
+            else if (absRate >= 3.0) color = '#cc1115'; // vivid red
+            else if (absRate >= 2.0) color = '#b30e13'; // rich red
+            else if (absRate >= 1.0) color = '#8c0a0e'; // wine red
+            else if (absRate >= 0.5) color = '#610609'; // dark wine red
+            else if (absRate >= 0.1) color = '#3b0305'; // deep dark burgundy
+          } else if (isDown) {
+            if (absRate >= 5.0) color = '#00b8d4'; // vibrant cerulean cyan
+            else if (absRate >= 3.0) color = '#008bbb'; // electric medium blue
+            else if (absRate >= 2.0) color = '#0073aa'; // vivid blue
+            else if (absRate >= 1.0) color = '#005b8a'; // classic sapphire blue
+            else if (absRate >= 0.5) color = '#004066'; // deep navy blue
+            else if (absRate >= 0.1) color = '#00263f'; // very dark navy
+          }
+        } else {
+          if (isUp) {
+            if (absRate >= 5.0) color = '#00df5a'; // brilliant electric green
+            else if (absRate >= 3.0) color = '#00a844'; // bright green
+            else if (absRate >= 2.0) color = '#0e833f'; // emerald green
+            else if (absRate >= 1.0) color = '#0a6230'; // medium dark emerald
+            else if (absRate >= 0.5) color = '#064421'; // dark forest green
+            else if (absRate >= 0.1) color = '#042a15'; // very dark green
+          } else if (isDown) {
+            if (absRate >= 5.0) color = '#e51c23'; // vibrant classic red
+            else if (absRate >= 3.0) color = '#cc1115'; // vivid red
+            else if (absRate >= 2.0) color = '#b30e13'; // rich red
+            else if (absRate >= 1.0) color = '#8c0a0e'; // wine red
+            else if (absRate >= 0.5) color = '#610609'; // dark red
+            else if (absRate >= 0.1) color = '#3b0305'; // very dark burgundy
+          }
+        }
+
+        // Perfect high-readability responsive text dimensions with auto line-breaking and micro scaling
+        const nameLength = item.name.length || 1;
+        
+        // Let's find the ideal single-line font size to see if it can fit on one line
+        // Each Korean/English mixed char average width is approximately its font size.
+        const idealSingleLineFontSize = (width * 0.91) / nameLength;
+        
+        let dynamicFontSize = 12;
+        let isWrapping = false;
+
+        if (idealSingleLineFontSize >= 11.5) {
+          // Plenty of space to render normally on one line
+          dynamicFontSize = Math.min(13.5, idealSingleLineFontSize);
+          isWrapping = false;
+        } else if (idealSingleLineFontSize >= 7.0) {
+          // Scale down slightly to fit on a SINGLE line! No wrapping needed, extremely clean and readable.
+          dynamicFontSize = idealSingleLineFontSize;
+          isWrapping = false;
+        } else {
+          // Cell is too narrow to fit on one line, so wrap is inevitable.
+          isWrapping = true;
+          
+          // Let's calculate expected wrapped lines and scale down even further as requested
+          const approxRowsExpected = Math.ceil(nameLength / Math.max(2, Math.floor(width / 7)));
+          const heightLimit = (height * 0.78) / (approxRowsExpected + 1); // safe height division
+          const widthLimit = (width * 0.9) / Math.max(2, Math.ceil(nameLength / approxRowsExpected));
+          
+          // Shrink font size even more so that wrapped lines fit perfectly inside the tiny box
+          const wrappedFontSize = Math.min(widthLimit, heightLimit) * 0.82;
+          dynamicFontSize = Math.max(5.0, Math.min(7.2, wrappedFontSize));
+        }
+
+        let rateFontSize = Math.max(4.8, Math.min(11, dynamicFontSize * 0.82));
+        if (isWrapping) {
+          // Further reduce rate font size under wrapping conditions to maintain strict hierarchy
+          rateFontSize = Math.max(4.3, Math.min(6.8, dynamicFontSize * 0.78));
+        }
+
+        return (
+          <div
+            key={item.code}
+            className="absolute transition-all duration-150 flex flex-col items-center justify-center border text-center select-none overflow-hidden p-[1px] leading-tight"
+            style={{
+              left: `${x}px`,
+              top: `${y}px`,
+              width: `${width}px`,
+              height: `${height}px`,
+              backgroundColor: color,
+              borderColor: isHovered ? '#ffffff' : '#0d0f14',
+              borderWidth: isHovered ? '2px' : '0.5px',
+              zIndex: isHovered ? 10 : 1,
+              cursor: 'pointer',
+            }}
+            onMouseEnter={() => onHoverStock(item)}
+            onMouseLeave={() => onHoverStock(null)}
+          >
+            <div 
+              className="font-bold tracking-tight text-white select-none break-all w-full overflow-hidden text-ellipsis leading-[1.1] px-[1px]"
+              style={{ fontSize: `${dynamicFontSize}px`, fontFamily: 'Pretendard, Inter, sans-serif' }}
+            >
+              {item.name}
+            </div>
+            <div 
+              className="font-medium tracking-tight text-white/95 select-none leading-none mt-[1px] break-all w-full overflow-hidden text-ellipsis"
+              style={{ fontSize: `${rateFontSize}px`, fontFamily: 'Pretendard, Inter, sans-serif' }}
+            >
+              {rate > 0 ? '+' : ''}{rate.toFixed(2)}%
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+};
 
 // --- Components ---
 
@@ -163,6 +468,14 @@ export default function App() {
   const [lastUpdate, setLastUpdate] = useState<Date>(new Date());
   const [isLoading, setIsLoading] = useState(true);
   const [targetDate, setTargetDate] = useState<Date>(toZonedTime(new Date(), KST_TZ));
+  
+  // Treemap States
+  const [marketStocks, setMarketStocks] = useState<any[]>([]);
+  const [isTreemapLoading, setIsTreemapLoading] = useState(false);
+  const [treemapMarket, setTreemapMarket] = useState<'ALL' | 'KOSPI' | 'KOSDAQ'>('ALL');
+  const [treemapColorMode, setTreemapColorMode] = useState<'KR' | 'US'>('KR');
+  const [treemapLimit, setTreemapLimit] = useState<number>(50);
+  const [hoveredStock, setHoveredStock] = useState<any | null>(null);
 
   const fetchData = async (dateToUse: Date = targetDate) => {
     setIsLoading(true);
@@ -263,6 +576,23 @@ export default function App() {
         return name.includes('변동성');
       });
       setKrxVol(vIndex);
+    }
+
+    // Fetch Naver Market Stock list for Treemap
+    setIsTreemapLoading(true);
+    try {
+      const allStocksRes = await fetchNaverMarketStocks();
+      if (allStocksRes) {
+        const extracted = extractMarketStocks(allStocksRes);
+        const normalized = extracted.map(normalizeStockItem);
+        // Sort by marketValueAmount descending (largest first)
+        normalized.sort((a, b) => b.marketValueAmount - a.marketValueAmount);
+        setMarketStocks(normalized);
+      }
+    } catch (err) {
+      console.error('Failed to populate Treemap data:', err);
+    } finally {
+      setIsTreemapLoading(false);
     }
 
     setLastUpdate(new Date());
@@ -376,6 +706,32 @@ export default function App() {
     }
     return ticks;
   }, []);
+
+  const filteredTreemapData = useMemo(() => {
+    let list = [...marketStocks];
+
+    // 1. Filter by market type
+    if (treemapMarket === 'KOSPI') {
+      list = list.filter(s => s.sosok === '0' || String(s.sosok).includes('KOSPI') || String(s.sosok).trim() === '001');
+    } else if (treemapMarket === 'KOSDAQ') {
+      list = list.filter(s => s.sosok === '1' || String(s.sosok).includes('KOSDAQ') || String(s.sosok).trim() === '002');
+    }
+
+    // 2. Sort by marketValueAmount descending to ensure major caps are first
+    list.sort((a, b) => (b.marketValueAmount || 0) - (a.marketValueAmount || 0));
+
+    // 3. Keep only the requested Top N items (dynamic limit)
+    const limitedList = list.slice(0, treemapLimit);
+
+    // 4. Map to Recharts children format
+    const childrenList = limitedList.map(item => ({
+      ...item,
+      name: item.name,
+      value: item.marketValueAmount || 1, // Recharts needs value
+    }));
+
+    return [{ name: "ROOT", children: childrenList }];
+  }, [marketStocks, treemapMarket, treemapLimit]);
 
   return (
     <div className="w-full h-screen bg-gray-50 flex overflow-hidden font-sans text-gray-900">
@@ -620,6 +976,278 @@ export default function App() {
                   )}
                 </LineChart>
               </ResponsiveContainer>
+            </div>
+          </div>
+
+          {/* Treemap Card */}
+          <div className="bg-white border border-gray-200 rounded-xl p-8 flex flex-col shadow-sm gap-6">
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+              <div>
+                <h3 className="font-bold text-gray-700 flex items-center gap-2">
+                  <div className="w-1.5 h-1.5 rounded-full bg-blue-600 animate-pulse" />
+                  K-Stock Market Heatmap (Korea Stock Treemap)
+                </h3>
+                <p className="text-xs text-gray-400 mt-1">
+                  Stocks are sized by their market capitalization. Hover over a block to view details.
+                </p>
+              </div>
+
+              {/* Controls */}
+              <div className="flex flex-wrap items-center gap-3">
+                {/* Market Toggle */}
+                <div className="flex bg-gray-100 rounded-lg p-0.5 border border-gray-200">
+                  <button
+                    onClick={() => setTreemapMarket('ALL')}
+                    className={cn(
+                      "px-3 py-1 text-xs font-bold rounded-md transition-all cursor-pointer",
+                      treemapMarket === 'ALL' ? "bg-white text-gray-800 shadow-xs" : "text-gray-500 hover:text-gray-900"
+                    )}
+                  >
+                    전체
+                  </button>
+                  <button
+                    onClick={() => setTreemapMarket('KOSPI')}
+                    className={cn(
+                      "px-3 py-1 text-xs font-bold rounded-md transition-all cursor-pointer",
+                      treemapMarket === 'KOSPI' ? "bg-white text-gray-800 shadow-xs" : "text-gray-500 hover:text-gray-900"
+                    )}
+                  >
+                    코스피 (KOSPI)
+                  </button>
+                  <button
+                    onClick={() => setTreemapMarket('KOSDAQ')}
+                    className={cn(
+                      "px-3 py-1 text-xs font-bold rounded-md transition-all cursor-pointer",
+                      treemapMarket === 'KOSDAQ' ? "bg-white text-gray-800 shadow-xs" : "text-gray-500 hover:text-gray-900"
+                    )}
+                  >
+                    코스닥 (KOSDAQ)
+                  </button>
+                </div>
+
+                {/* Treemap Size (Top N) Toggle */}
+                <div className="flex bg-gray-100 rounded-lg p-0.5 border border-gray-200">
+                  <button
+                    onClick={() => setTreemapLimit(50)}
+                    className={cn(
+                      "px-3 py-1 text-xs font-bold rounded-md transition-all cursor-pointer",
+                      treemapLimit === 50 ? "bg-white text-gray-800 shadow-xs animate-fade-in" : "text-gray-500 hover:text-gray-900"
+                    )}
+                  >
+                    Top 50
+                  </button>
+                  <button
+                    onClick={() => setTreemapLimit(100)}
+                    className={cn(
+                      "px-3 py-1 text-xs font-bold rounded-md transition-all cursor-pointer",
+                      treemapLimit === 100 ? "bg-white text-gray-800 shadow-xs" : "text-gray-500 hover:text-gray-900"
+                    )}
+                  >
+                    Top 100
+                  </button>
+                  <button
+                    onClick={() => setTreemapLimit(200)}
+                    className={cn(
+                      "px-3 py-1 text-xs font-bold rounded-md transition-all cursor-pointer",
+                      treemapLimit === 200 ? "bg-white text-gray-800 shadow-xs" : "text-gray-500 hover:text-gray-900"
+                    )}
+                  >
+                    Top 200
+                  </button>
+                </div>
+
+                {/* Theme Palette Mode Toggle */}
+                <div className="flex bg-gray-100 rounded-lg p-0.5 border border-gray-200">
+                  <button
+                    onClick={() => setTreemapColorMode('KR')}
+                    className={cn(
+                      "px-2.5 py-1 text-[10px] font-extrabold rounded-md transition-all flex items-center gap-1 cursor-pointer",
+                      treemapColorMode === 'KR' ? "bg-white text-red-600 shadow-xs" : "text-gray-500 hover:text-gray-900"
+                    )}
+                    title="Traditional Korean stock palette (Red rise, Blue fall)"
+                  >
+                    <span className="inline-block w-2.5 h-2.5 rounded-full bg-gradient-to-tr from-blue-500 to-red-500" />
+                    KR Style
+                  </button>
+                  <button
+                    onClick={() => setTreemapColorMode('US')}
+                    className={cn(
+                      "px-2.5 py-1 text-[10px] font-extrabold rounded-md transition-all flex items-center gap-1 cursor-pointer",
+                      treemapColorMode === 'US' ? "bg-white text-emerald-600 shadow-xs" : "text-gray-500 hover:text-gray-900"
+                    )}
+                    title="Global stock palette (Green rise, Red fall)"
+                  >
+                    <span className="inline-block w-2.5 h-2.5 rounded-full bg-gradient-to-tr from-red-500 to-emerald-500" />
+                    US Style
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* Live Legend Bar */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-gray-50 rounded-xl p-4 border border-gray-100">
+              {/* Color scale legend */}
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] font-bold text-gray-400">하락 (≤ -5%)</span>
+                <div className="flex h-3 w-40 rounded-sm overflow-hidden border border-gray-200 shadow-2xs">
+                  {treemapColorMode === 'KR' ? (
+                    <>
+                      <div className="flex-1 bg-[#00b8d4]" title="-5% 이하 (하한/급락)" />
+                      <div className="flex-1 bg-[#008bbb]" title="-3%급" />
+                      <div className="flex-1 bg-[#0073aa]" title="-2%급" />
+                      <div className="flex-1 bg-[#004066]" title="-0.5%급" />
+                      <div className="flex-1 bg-[#1f222b]" title="보합" />
+                      <div className="flex-1 bg-[#610609]" title="+0.5%급" />
+                      <div className="flex-1 bg-[#b30e13]" title="+2%급" />
+                      <div className="flex-1 bg-[#cc1115]" title="+3%급" />
+                      <div className="flex-1 bg-[#e51c23]" title="+5% 이상 (상한/급등)" />
+                    </>
+                  ) : (
+                    <>
+                      <div className="flex-1 bg-[#e51c23]" title="-5% 이하 (하한/급락)" />
+                      <div className="flex-1 bg-[#cc1115]" title="-3%급" />
+                      <div className="flex-1 bg-[#b30e13]" title="-2%급" />
+                      <div className="flex-1 bg-[#610609]" title="-0.5%급" />
+                      <div className="flex-1 bg-[#1f222b]" title="보합" />
+                      <div className="flex-1 bg-[#064421]" title="+0.5%급" />
+                      <div className="flex-1 bg-[#0e833f]" title="+2%급" />
+                      <div className="flex-1 bg-[#00a844]" title="+3%급" />
+                      <div className="flex-1 bg-[#00df5a]" title="+5% 이상 (상한/급등)" />
+                    </>
+                  )}
+                </div>
+                <span className="text-[10px] font-bold text-gray-400">상승 (≥ +5%)</span>
+              </div>
+
+              {/* Status info or search result feedback */}
+              <div className="text-right text-[10px] font-bold text-gray-500 uppercase tracking-wider">
+                {isTreemapLoading ? (
+                  <span className="text-blue-500 animate-pulse">Syncing Heatmap...</span>
+                ) : filteredTreemapData[0]?.children ? (
+                  <span>전체 {filteredTreemapData[0].children.length}개 종목</span>
+                ) : (
+                  <span>Ready</span>
+                )}
+              </div>
+            </div>
+
+            {/* Treemap Content Area */}
+            <div className="grid grid-cols-1 xl:grid-cols-4 gap-6 w-full items-stretch">
+              <div className="xl:col-span-3 min-h-[460px] w-full bg-[#0b0e14] rounded-xl relative overflow-hidden border border-slate-800/80 shadow-inner flex items-center justify-center p-1">
+                {isTreemapLoading && marketStocks.length === 0 ? (
+                  <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-400 gap-3 bg-[#0b0e14]/95 z-20">
+                    <RefreshCw size={24} className="animate-spin text-blue-500" />
+                    <span className="text-xs font-bold tracking-widest uppercase text-slate-200">Loading Market Capitalizations...</span>
+                  </div>
+                ) : null}
+
+                {/* Real interactive Custom CSS Treemap */}
+                {filteredTreemapData[0]?.children && filteredTreemapData[0].children.length > 0 ? (
+                  <div className="w-full h-full flex flex-col justify-between p-2">
+                    <div className="w-full h-[430px]">
+                      <TreemapComponent
+                        data={filteredTreemapData[0].children}
+                        colorMode={treemapColorMode}
+                        hoveredStockCode={hoveredStock ? hoveredStock.code : null}
+                        onHoverStock={setHoveredStock}
+                      />
+                    </div>
+                    <div className="text-[10px] text-slate-400 px-2 pb-1 flex justify-between items-center bg-[#0b0e14] mt-2">
+                      <span>※ 종목 상세구분(KOSPI/KOSDAQ)은 우측 <b>Stock Specification</b> 패널에서 확인 가능합니다.</span>
+                      <span>선택한 개수(Top {treemapLimit})의 시가총액 상위 종목들만 정밀 시각화합니다.</span>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="text-slate-400 text-xs font-semibold py-20 flex flex-col items-center gap-2">
+                    <span>표시할 한국 주식 데이터가 없습니다.</span>
+                  </div>
+                )}
+              </div>
+
+              {/* Hover stock details board card */}
+              <div className="xl:col-span-1 bg-gray-50 border border-gray-100 rounded-xl p-5 flex flex-col justify-between shadow-xs">
+                <div>
+                  <h4 className="text-[10px] font-extrabold text-gray-400 uppercase tracking-widest mb-4">Stock Specification</h4>
+                  <AnimatePresence mode="wait">
+                    {hoveredStock ? (
+                      <motion.div
+                        key={hoveredStock.code}
+                        initial={{ opacity: 0, y: 5 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0, y: -5 }}
+                        transition={{ duration: 0.15 }}
+                        className="space-y-4"
+                      >
+                        <div>
+                          <span className={cn(
+                            "px-2 py-0.5 rounded text-[8px] font-extrabold tracking-widest uppercase mr-1.5",
+                            hoveredStock.sosok === '0' || String(hoveredStock.sosok).includes('KOSPI') || String(hoveredStock.sosok).trim() === '001'
+                              ? "bg-blue-100 text-blue-800"
+                              : "bg-emerald-100 text-emerald-800"
+                          )}>
+                            {hoveredStock.sosok === '0' || String(hoveredStock.sosok).includes('KOSPI') || String(hoveredStock.sosok).trim() === '001' ? 'KOSPI' : 'KOSDAQ'}
+                          </span>
+                          <span className="text-xs font-mono text-gray-400">#{hoveredStock.code}</span>
+                          <h2 className="text-base font-black tracking-tight text-gray-900 mt-1">{hoveredStock.name}</h2>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-3 py-3 border-y border-gray-200/60">
+                          <div>
+                            <span className="text-[9px] font-bold text-gray-400 block uppercase">Price</span>
+                            <span className="text-base font-extrabold text-gray-800">{formatNumber(hoveredStock.closePrice)} 원</span>
+                          </div>
+                          <div>
+                            <span className="text-[9px] font-bold text-gray-400 block uppercase">Fluctuation</span>
+                            <span className={cn(
+                              "text-base font-extrabold flex items-center gap-0.5",
+                              hoveredStock.fluctuationsRatio > 0 ? "text-emerald-600" : hoveredStock.fluctuationsRatio < 0 ? "text-rose-600" : "text-gray-500"
+                            )}>
+                              {hoveredStock.fluctuationsRatio > 0 ? '▲' : hoveredStock.fluctuationsRatio < 0 ? '▼' : '■'}{' '}
+                              {hoveredStock.fluctuationsRatio.toFixed(2)}%
+                            </span>
+                          </div>
+                        </div>
+
+                        <div className="space-y-2 pt-2">
+                          <div className="flex justify-between items-center text-xs">
+                            <span className="text-gray-400">Market Cap (시가총액)</span>
+                            <span className="font-bold text-gray-700">
+                              {hoveredStock.marketValueAmount >= 10000 
+                                ? `${(hoveredStock.marketValueAmount / 10000).toFixed(1)}조 원` 
+                                : `${formatNumber(hoveredStock.marketValueAmount)}억 원`}
+                            </span>
+                          </div>
+                          <div className="flex justify-between items-center text-xs">
+                            <span className="text-gray-400">Daily Change (대비)</span>
+                            <span className="font-mono font-medium text-gray-600">
+                              {hoveredStock.changeValue > 0 ? `+${formatNumber(hoveredStock.changeValue)}` : hoveredStock.changeValue < 0 ? `-${formatNumber(Math.abs(hoveredStock.changeValue))}` : '0'} 원
+                            </span>
+                          </div>
+                        </div>
+                      </motion.div>
+                    ) : (
+                      <div className="py-12 text-center text-gray-400 space-y-2">
+                        <div className="text-2xl">🗺️</div>
+                        <p className="text-xs font-semibold">마우스 커서를 지도 타일 위에 올리면 종목별 상세정보(가격, 등락율, 시가총액)가 표시됩니다.</p>
+                      </div>
+                    )}
+                  </AnimatePresence>
+                </div>
+
+                <div className="mt-8 pt-4 border-t border-gray-100 text-[10px] text-gray-400 text-center flex flex-col gap-1.5">
+                  <div className="flex justify-center items-center gap-4">
+                    <span className="flex items-center gap-1">
+                      <span className="w-1.5 h-1.5 rounded-full bg-blue-500 inline-block" />
+                      KOSPI
+                    </span>
+                    <span className="flex items-center gap-1">
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block" />
+                      KOSDAQ
+                    </span>
+                  </div>
+                  <p className="font-medium text-[9px] mt-2">※ 실시간 시가총액 기준 정렬 상위 그룹 시각화</p>
+                </div>
+              </div>
             </div>
           </div>
 

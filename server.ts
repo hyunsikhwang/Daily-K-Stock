@@ -32,6 +32,28 @@ async function startServer() {
     }
   });
 
+  // Proxy for Naver stock list (Treemap data)
+  app.get("/api/stock/market", async (req, res) => {
+    try {
+      const response = await axios.get("https://stock.naver.com/api/domestic/market/stock/default", {
+        params: {
+          tradeType: "KRX",
+          marketType: "ALL",
+          orderType: "priceTop",
+          startIdx: 0,
+          pageSize: 10000,
+        },
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+        },
+      });
+      res.json(response.data);
+    } catch (error) {
+      console.error("Error fetching Naver market list:", error);
+      res.status(500).json({ error: "Failed to fetch Naver market list" });
+    }
+  });
+
   // Proxy for KRX API
   app.get("/api/stock/krx/:type", async (req, res) => {
     const { type } = req.params; // 'futures' or 'volatility'
