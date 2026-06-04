@@ -295,7 +295,7 @@ const TreemapComponent = ({
               height: `${height}px`,
               backgroundColor: color,
               borderColor: isHovered ? '#ffffff' : '#0d0f14',
-              borderWidth: isHovered ? '2px' : '0.5px',
+              borderWidth: isHovered ? '2px' : '0.3px',
               zIndex: isHovered ? 10 : 1,
               cursor: 'pointer',
             }}
@@ -474,7 +474,7 @@ export default function App() {
   const [isTreemapLoading, setIsTreemapLoading] = useState(false);
   const [treemapMarket, setTreemapMarket] = useState<'ALL' | 'KOSPI' | 'KOSDAQ'>('ALL');
   const [treemapColorMode, setTreemapColorMode] = useState<'KR' | 'US'>('KR');
-  const [treemapLimit, setTreemapLimit] = useState<number>(50);
+  const [treemapLimit, setTreemapLimit] = useState<number>(100);
   const [hoveredStock, setHoveredStock] = useState<any | null>(null);
 
   const fetchData = async (dateToUse: Date = targetDate) => {
