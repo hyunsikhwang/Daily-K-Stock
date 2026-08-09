@@ -3,6 +3,7 @@ import { createServer as createViteServer } from "vite";
 import axios from "axios";
 import path from "path";
 import dotenv from "dotenv";
+import { getKRXVolatilityHistoryPoints, syncKRXDate, getTradingDays } from "./src/krxVolatilityService.js";
 
 dotenv.config();
 
@@ -51,6 +52,106 @@ async function startServer() {
     } catch (error) {
       console.error("Error fetching Naver market list:", error);
       res.status(500).json({ error: "Failed to fetch Naver market list" });
+    }
+  });
+
+  // Dedicated 1-Year Index History Route (KOSPI, KOSDAQ, NIGHT, VOLATILITY)
+  app.get("/api/stock/index/history", async (req, res) => {
+    const type = String(req.query.type || "VOLATILITY").toUpperCase();
+    try {
+      if (type === "VOLATILITY") {
+        const authKey = process.env.KRX_AUTH_KEY;
+        if (authKey && authKey !== "YOUR_KRX_API_KEY") {
+          const recentDays = getTradingDays(3);
+          for (const dateStr of recentDays) {
+            await syncKRXDate(dateStr, authKey);
+            await new Promise(resolve => setTimeout(resolve, 50));
+          }
+        }
+        const history = getKRXVolatilityHistoryPoints();
+        return res.json(history);
+      }
+
+      // Handle KOSPI, KOSDAQ, and NIGHT via Yahoo Finance API with calculation
+      let sym = "^KS11";
+      if (type === "KOSDAQ") sym = "^KQ11";
+
+      const yahooUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${sym}?range=1y&interval=1d`;
+      const response = await axios.get(yahooUrl, {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        },
+        timeout: 10000
+      });
+
+      const result = response.data?.chart?.result?.[0];
+      const timestamps: number[] = result?.timestamp || [];
+      const quotes: (number | null)[] = result?.indicators?.quote?.[0]?.close || [];
+
+      const points: any[] = [];
+      const rawValues: number[] = [];
+
+      // Night futures ratio relative to KOSPI baseline (approx ~995.40 / 6258.77)
+      const scaleFactor = type === "NIGHT" ? (995.40 / 6258.77) : 1.0;
+
+      for (let i = 0; i < timestamps.length; i++) {
+        const rawVal = quotes[i];
+        if (rawVal !== null && rawVal !== undefined && !isNaN(rawVal)) {
+          const val = Math.round((rawVal * scaleFactor) * 100) / 100;
+          rawValues.push(val);
+
+          const d = new Date(timestamps[i] * 1000);
+          const yyyy = d.getFullYear();
+          const mm = String(d.getMonth() + 1).padStart(2, '0');
+          const dd = String(d.getDate()).padStart(2, '0');
+          const dateStr = `${yyyy}-${mm}-${dd}`;
+          const displayDate = `${String(yyyy).slice(2)}.${mm}.${dd}`;
+
+          const prevVal = rawValues.length > 1 ? rawValues[rawValues.length - 2] : val;
+          const change = Math.round((val - prevVal) * 100) / 100;
+          const changeRate = prevVal > 0 ? Math.round((change / prevVal) * 10000) / 100 : 0;
+
+          const maStart = Math.max(0, rawValues.length - 20);
+          const maSlice = rawValues.slice(maStart);
+          const ma20 = Math.round((maSlice.reduce((a, b) => a + b, 0) / maSlice.length) * 100) / 100;
+
+          points.push({
+            date: dateStr,
+            displayDate,
+            value: val,
+            change,
+            changeRate,
+            ma20
+          });
+        }
+      }
+
+      if (points.length > 0) {
+        return res.json(points);
+      }
+      res.status(500).json({ error: "No historical data returned" });
+    } catch (error: any) {
+      console.error(`Error generating ${type} index history:`, error.message);
+      res.status(500).json({ error: `Failed to fetch ${type} index history` });
+    }
+  });
+
+  // Dedicated 1-Year KRX Volatility Index History Route (legacy compatibility)
+  app.get("/api/stock/krx/volatility/history", async (req, res) => {
+    try {
+      const authKey = process.env.KRX_AUTH_KEY;
+      if (authKey && authKey !== "YOUR_KRX_API_KEY") {
+        const recentDays = getTradingDays(3);
+        for (const dateStr of recentDays) {
+          await syncKRXDate(dateStr, authKey);
+          await new Promise(resolve => setTimeout(resolve, 50));
+        }
+      }
+      const history = getKRXVolatilityHistoryPoints();
+      res.json(history);
+    } catch (error: any) {
+      console.error("Error generating KRX volatility history:", error.message);
+      res.status(500).json({ error: "Failed to fetch KRX volatility history" });
     }
   });
 

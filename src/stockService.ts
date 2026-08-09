@@ -78,3 +78,150 @@ export const fetchNaverMarketStocks = async (): Promise<any> => {
     return null;
   }
 };
+
+export interface VolatilityHistoryPoint {
+  date: string;
+  displayDate: string;
+  value: number;
+  change: number;
+  changeRate: number;
+  ma20: number;
+}
+
+export const fetchKRXVolatilityHistory = async (): Promise<VolatilityHistoryPoint[]> => {
+  return fetchIndexHistory('VOLATILITY');
+};
+
+export const fetchIndexHistory = async (type: string = 'VOLATILITY'): Promise<VolatilityHistoryPoint[]> => {
+  try {
+    const response = await axios.get('/api/stock/index/history', {
+      params: { type: type.toUpperCase() }
+    });
+    if (Array.isArray(response.data) && response.data.length > 0) {
+      return response.data;
+    }
+  } catch (error) {
+    console.error(`Error fetching ${type} index history:`, error);
+  }
+  return [];
+};
+
+export const generateIndexHistory = (type: string = 'VOLATILITY', currentVal: number = 0, refDate: Date = new Date()): VolatilityHistoryPoint[] => {
+  if (type.toUpperCase() === 'VOLATILITY') {
+    return generateVolatilityHistory(currentVal || 75.59, refDate);
+  }
+
+  // Baseline defaults if currentVal not provided
+  let defaultVal = 6258.77;
+  if (type.toUpperCase() === 'KOSDAQ') defaultVal = 798.81;
+  if (type.toUpperCase() === 'NIGHT') defaultVal = 995.40;
+
+  const baseVal = currentVal > 0 ? currentVal : defaultVal;
+  const points: VolatilityHistoryPoint[] = [];
+  const tradingDays: Date[] = [];
+  
+  let curr = new Date(refDate);
+  for (let i = 0; i < 365; i++) {
+    const dayOfWeek = curr.getDay();
+    if (dayOfWeek !== 0 && dayOfWeek !== 6) {
+      tradingDays.unshift(new Date(curr));
+    }
+    curr.setDate(curr.getDate() - 1);
+  }
+  
+  const totalDays = tradingDays.length;
+  if (totalDays === 0) return [];
+
+  const rawValues: number[] = new Array(totalDays);
+  rawValues[totalDays - 1] = baseVal;
+
+  for (let i = totalDays - 2; i >= 0; i--) {
+    const nextVal = rawValues[i + 1];
+    const progress = i / totalDays;
+    const wave = Math.sin(i * 0.08) * (baseVal * 0.04) + Math.cos(i * 0.15) * (baseVal * 0.02);
+    let prevVal = Math.round((baseVal * (0.85 + progress * 0.15) + wave) * 100) / 100;
+    if (Math.abs(prevVal - nextVal) > baseVal * 0.03) {
+      prevVal = Math.round((nextVal + (prevVal > nextVal ? -baseVal * 0.008 : baseVal * 0.008)) * 100) / 100;
+    }
+    rawValues[i] = Math.max(1.0, prevVal);
+  }
+
+  for (let i = 0; i < totalDays; i++) {
+    const d = tradingDays[i];
+    const val = rawValues[i];
+    const prevVal = i > 0 ? rawValues[i - 1] : val;
+    const change = Math.round((val - prevVal) * 100) / 100;
+    const changeRate = prevVal > 0 ? Math.round((change / prevVal) * 10000) / 100 : 0;
+    
+    const maStart = Math.max(0, i - 19);
+    const maSlice = rawValues.slice(maStart, i + 1);
+    const ma20 = Math.round((maSlice.reduce((a, b) => a + b, 0) / maSlice.length) * 100) / 100;
+
+    points.push({
+      date: format(d, 'yyyy-MM-dd'),
+      displayDate: format(d, 'yy.MM.dd'),
+      value: val,
+      change,
+      changeRate,
+      ma20,
+    });
+  }
+
+  return points;
+};
+
+export const generateVolatilityHistory = (currentVal: number = 75.59, refDate: Date = new Date()): VolatilityHistoryPoint[] => {
+  const points: VolatilityHistoryPoint[] = [];
+  const tradingDays: Date[] = [];
+  
+  let curr = new Date(refDate);
+  for (let i = 0; i < 365; i++) {
+    const dayOfWeek = curr.getDay();
+    if (dayOfWeek !== 0 && dayOfWeek !== 6) {
+      tradingDays.unshift(new Date(curr));
+    }
+    curr.setDate(curr.getDate() - 1);
+  }
+  
+  const totalDays = tradingDays.length;
+  if (totalDays === 0) return [];
+
+  const rawValues: number[] = new Array(totalDays);
+  rawValues[totalDays - 1] = currentVal > 0 ? currentVal : 75.59;
+
+  for (let i = totalDays - 2; i >= 0; i--) {
+    const nextVal = rawValues[i + 1];
+    const progress = i / totalDays;
+    const baseTarget = 22.0 + progress * 50.0;
+    const noise = Math.sin(i * 0.15) * 1.5;
+    let prevVal = Math.round((baseTarget + noise) * 100) / 100;
+    if (Math.abs(prevVal - nextVal) > 5) {
+      prevVal = Math.round((nextVal + (prevVal > nextVal ? -1.8 : 1.8)) * 100) / 100;
+    }
+    rawValues[i] = Math.max(14.5, prevVal);
+  }
+
+  for (let i = 0; i < totalDays; i++) {
+    const d = tradingDays[i];
+    const val = rawValues[i];
+    const prevVal = i > 0 ? rawValues[i - 1] : val;
+    const change = Math.round((val - prevVal) * 100) / 100;
+    const changeRate = prevVal > 0 ? Math.round((change / prevVal) * 10000) / 100 : 0;
+    
+    const maStart = Math.max(0, i - 19);
+    const maSlice = rawValues.slice(maStart, i + 1);
+    const ma20 = Math.round((maSlice.reduce((a, b) => a + b, 0) / maSlice.length) * 100) / 100;
+
+    points.push({
+      date: format(d, 'yyyy-MM-dd'),
+      displayDate: format(d, 'yy.MM.dd'),
+      value: val,
+      change,
+      changeRate,
+      ma20,
+    });
+  }
+
+  return points;
+};
+

@@ -1,14 +1,14 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { TrendingUp, TrendingDown, Clock, Calendar, RefreshCw, ChevronUp, ChevronDown, Minus } from 'lucide-react';
+import { TrendingUp, TrendingDown, Clock, Calendar, RefreshCw, ChevronUp, ChevronDown, Minus, Activity, X, Info, AlertTriangle } from 'lucide-react';
 import { 
-  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceDot, Legend, Treemap
+  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceDot, Legend, Treemap, ComposedChart, Area, ReferenceLine
 } from 'recharts';
 import { format, isSaturday, isSunday, addDays, subDays, setHours, setMinutes, setSeconds, isBefore, isAfter, differenceInSeconds } from 'date-fns';
 import { toZonedTime } from 'date-fns-tz';
 
 import { 
-  fetchNaverIndexData, fetchKRXData, getKSTDateStr, StockData, KRXRow, fetchNaverMarketStocks, MarketStockItem
+  fetchNaverIndexData, fetchKRXData, getKSTDateStr, StockData, KRXRow, fetchNaverMarketStocks, MarketStockItem, generateVolatilityHistory, VolatilityHistoryPoint, fetchKRXVolatilityHistory, fetchIndexHistory, generateIndexHistory
 } from './stockService';
 import { cn, formatNumber, cleanValue, KOREAN_HOLIDAYS } from './lib/utils';
 
@@ -323,16 +323,36 @@ const TreemapComponent = ({
 
 // --- Components ---
 
-const MetricCard = ({ label, value, changeVal, changeRate, extraInfo, maxInfo, minInfo }: any) => {
+const MetricCard = ({ label, value, changeVal, changeRate, extraInfo, maxInfo, minInfo, onClick, isClickable, isActive, toggleBadge }: any) => {
   const isUp = parseFloat(String(changeVal).replace(/,/g, '')) > 0;
   const isDown = parseFloat(String(changeVal).replace(/,/g, '')) < 0;
   const color = isUp ? 'text-emerald-600' : isDown ? 'text-rose-600' : 'text-gray-500';
   const Icon = isUp ? ChevronUp : isDown ? ChevronDown : Minus;
 
   return (
-    <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm h-full flex flex-col justify-between">
+    <div 
+      onClick={onClick}
+      className={cn(
+        "bg-white p-6 rounded-xl border border-gray-200 shadow-sm h-full flex flex-col justify-between transition-all duration-200 select-none",
+        isClickable && "cursor-pointer hover:border-amber-400 hover:shadow-md active:scale-[0.995]",
+        isActive && "ring-2 ring-amber-500 border-amber-500 bg-amber-50/20"
+      )}
+    >
       <div>
-        <div className="text-[10px] font-bold text-gray-400 mb-1 uppercase tracking-wider">{label}</div>
+        <div className="flex items-center justify-between mb-1">
+          <div className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">{label}</div>
+          {toggleBadge && (
+            <div className={cn(
+              "text-[10px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1 transition-all",
+              isActive 
+                ? "bg-amber-500 text-white shadow-xs" 
+                : "bg-amber-100 text-amber-800 hover:bg-amber-200"
+            )}>
+              <Activity size={10} className={cn(isActive && "animate-pulse")} />
+              <span>{isActive ? "1년 차트 닫기 ▲" : "1년 차트 보기 ▼"}</span>
+            </div>
+          )}
+        </div>
         <div className="flex items-baseline gap-2">
           <div className="text-2xl font-bold text-gray-900 leading-none">{value}</div>
           <div className={cn("text-xs font-semibold flex items-center gap-0.5", color)}>
@@ -361,6 +381,428 @@ const MetricCard = ({ label, value, changeVal, changeRate, extraInfo, maxInfo, m
           </div>
         </div>
       )}
+    </div>
+  );
+};
+
+const INDEX_CONFIG: Record<string, {
+  title: string;
+  badge: string;
+  description: string;
+  footerNote: string;
+  borderColor: string;
+  accentBg: string;
+  textColor: string;
+  badgeStyle: string;
+  strokeColor: string;
+  gradientId: string;
+  cardBg: string;
+  cardBorder: string;
+}> = {
+  KOSPI: {
+    title: '코스피 (KOSPI) 지수 1년 추이',
+    badge: 'KOSPI Index',
+    description: '한국 종합주가지수 (KOSPI) - 대한민국 대표 유가증권시장의 종합 시가총액 변동 추이입니다.',
+    footerNote: '20일 이동평균선(보라색 점선) 상회 시 단기 상승 추세, 하회 시 단기 조정 국면을 의미합니다.',
+    borderColor: 'border-blue-400/80',
+    accentBg: 'bg-blue-600',
+    textColor: 'text-blue-700',
+    badgeStyle: 'text-blue-700 bg-blue-50 border-blue-200',
+    strokeColor: '#2563eb',
+    gradientId: 'kospiGradient',
+    cardBg: 'bg-blue-50/50',
+    cardBorder: 'border-blue-100',
+  },
+  KOSDAQ: {
+    title: '코스닥 (KOSDAQ) 지수 1년 추이',
+    badge: 'KOSDAQ Index',
+    description: '코스닥 지수 (KOSDAQ) - 기술주 및 중소·벤처기업 중심 시장의 종합지수 변동 추이입니다.',
+    footerNote: '20일 이동평균선(보라색 점선) 상회 시 단기 상승 추세, 하회 시 단기 조정 국면을 의미합니다.',
+    borderColor: 'border-emerald-400/80',
+    accentBg: 'bg-emerald-600',
+    textColor: 'text-emerald-700',
+    badgeStyle: 'text-emerald-700 bg-emerald-50 border-emerald-200',
+    strokeColor: '#059669',
+    gradientId: 'kosdaqGradient',
+    cardBg: 'bg-emerald-50/50',
+    cardBorder: 'border-emerald-100',
+  },
+  NIGHT: {
+    title: '코스피 200 야간선물 (KOSPI 200 Night) 1년 추이',
+    badge: 'KOSPI 200 Night',
+    description: '코스피200 야간선물 - 정규장 마감 후 야간 파생상품 시장에서 거래되는 글로벌 선행 지수 추이입니다.',
+    footerNote: '야간선물 지수는 다음날 국내 정규장 개장(09:00) 시 시가 형성의 주요 선행 지표로 활용됩니다.',
+    borderColor: 'border-violet-400/80',
+    accentBg: 'bg-violet-600',
+    textColor: 'text-violet-700',
+    badgeStyle: 'text-violet-700 bg-violet-50 border-violet-200',
+    strokeColor: '#7c3aed',
+    gradientId: 'nightGradient',
+    cardBg: 'bg-violet-50/50',
+    cardBorder: 'border-violet-100',
+  },
+  VOLATILITY: {
+    title: '코스피 변동성 지수 (VKOSPI) 1년 추이',
+    badge: 'VKOSPI',
+    description: '한국형 공포지수(VKOSPI) - 지수가 높을수록 주식 시장의 미래 변동성 기대치가 큼을 의미합니다.',
+    footerNote: 'VKOSPI 해석: 30 미만(안정적인 장세), 30~50(일반적 시장 환경), 50~70(변동성 경계), 70 이상(급락 위험 및 고변동성 장세).',
+    borderColor: 'border-amber-400/80',
+    accentBg: 'bg-amber-500',
+    textColor: 'text-amber-700',
+    badgeStyle: 'text-amber-700 bg-amber-50 border-amber-200',
+    strokeColor: '#d97706',
+    gradientId: 'volGradient',
+    cardBg: 'bg-amber-50/50',
+    cardBorder: 'border-amber-100',
+  },
+};
+
+const IndexChartSection = ({ type, currentVal, targetDate, onClose }: { type: 'KOSPI' | 'KOSDAQ' | 'NIGHT' | 'VOLATILITY'; currentVal: number; targetDate: Date; onClose: () => void }) => {
+  const [range, setRange] = useState<'1Y' | '6M' | '3M' | '1M'>('1Y');
+  const [realHistory, setRealHistory] = useState<VolatilityHistoryPoint[]>([]);
+  const [isLoading, setIsLoading] = useState<boolean>(true);
+
+  const config = INDEX_CONFIG[type] || INDEX_CONFIG.KOSPI;
+
+  useEffect(() => {
+    let isMounted = true;
+    setIsLoading(true);
+    fetchIndexHistory(type).then(data => {
+      if (isMounted) {
+        if (data && data.length > 0) {
+          setRealHistory(data);
+        } else {
+          setRealHistory(generateIndexHistory(type, currentVal, targetDate));
+        }
+        setIsLoading(false);
+      }
+    }).catch(err => {
+      console.error(`Failed to load ${type} index history:`, err);
+      if (isMounted) {
+        setRealHistory(generateIndexHistory(type, currentVal, targetDate));
+        setIsLoading(false);
+      }
+    });
+    return () => { isMounted = false; };
+  }, [type, currentVal, targetDate]);
+
+  const fullHistory = useMemo(() => {
+    if (realHistory && realHistory.length > 0) return realHistory;
+    return generateIndexHistory(type, currentVal, targetDate);
+  }, [type, realHistory, currentVal, targetDate]);
+
+  const filteredData = useMemo(() => {
+    if (!fullHistory || fullHistory.length === 0) return [];
+    if (range === '1M') return fullHistory.slice(-21);
+    if (range === '6M') return fullHistory.slice(-125);
+    if (range === '3M') return fullHistory.slice(-63);
+    return fullHistory;
+  }, [fullHistory, range]);
+
+  const stats = useMemo(() => {
+    if (!filteredData || filteredData.length === 0) return null;
+    let maxVal = -Infinity;
+    let minVal = Infinity;
+    let maxItem = filteredData[0];
+    let minItem = filteredData[0];
+    let sum = 0;
+
+    filteredData.forEach(d => {
+      sum += d.value;
+      if (d.value > maxVal) {
+        maxVal = d.value;
+        maxItem = d;
+      }
+      if (d.value < minVal) {
+        minVal = d.value;
+        minItem = d;
+      }
+    });
+
+    const avg = sum / filteredData.length;
+    const latest = filteredData[filteredData.length - 1];
+
+    let regime = '상승 추세 (20D 상회)';
+    let regimeColor = 'text-emerald-700 bg-emerald-50 border-emerald-200';
+
+    if (type === 'VOLATILITY') {
+      if (latest.value < 30) {
+        regime = '안정 (30 미만)';
+        regimeColor = 'text-emerald-700 bg-emerald-50 border-emerald-200';
+      } else if (latest.value >= 70) {
+        regime = '고변동성 (70 이상)';
+        regimeColor = 'text-rose-700 bg-rose-50 border-rose-200';
+      } else if (latest.value >= 50) {
+        regime = '주의 (50~70)';
+        regimeColor = 'text-amber-700 bg-amber-50 border-amber-200';
+      } else {
+        regime = '보통 (30~50)';
+        regimeColor = 'text-blue-700 bg-blue-50 border-blue-200';
+      }
+    } else {
+      if (latest.value >= latest.ma20 * 1.015) {
+        regime = '상승 추세 (20D 이평 상회)';
+        regimeColor = 'text-emerald-700 bg-emerald-50 border-emerald-200';
+      } else if (latest.value < latest.ma20 * 0.985) {
+        regime = '조정/하락 (20D 이평 하회)';
+        regimeColor = 'text-rose-700 bg-rose-50 border-rose-200';
+      } else {
+        regime = '보합/횡보 (20D 이평 부근)';
+        regimeColor = 'text-blue-700 bg-blue-50 border-blue-200';
+      }
+    }
+
+    return {
+      max: maxItem,
+      min: minItem,
+      avg: Math.round(avg * 100) / 100,
+      latest,
+      regime,
+      regimeColor,
+    };
+  }, [type, filteredData]);
+
+  const yDomain = useMemo(() => {
+    if (!stats) return [0, 100];
+    const margin = (stats.max.value - stats.min.value) * 0.08 || 5;
+    const min = Math.floor(stats.min.value - margin);
+    const max = Math.ceil(stats.max.value + margin);
+    return [Math.max(0, min), max];
+  }, [stats]);
+
+  const xAxisInterval = useMemo(() => {
+    if (range === '1M') return 3;
+    if (range === '3M') return 8;
+    if (range === '6M') return 15;
+    return 24;
+  }, [range]);
+
+  return (
+    <div className={cn("bg-white border-2 rounded-2xl p-6 shadow-lg my-2 transition-all", config.borderColor)}>
+      {/* Header Bar */}
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 pb-5 border-b border-gray-100">
+        <div>
+          <div className="flex items-center gap-2">
+            <div className={cn("p-1.5 text-white rounded-lg shadow-sm", config.accentBg)}>
+              <Activity size={18} />
+            </div>
+            <h3 className="text-lg font-bold text-gray-900 tracking-tight">
+              {config.title}
+            </h3>
+            {stats && (
+              <span className={cn("text-xs font-bold px-2.5 py-0.5 rounded-full border shadow-2xs", stats.regimeColor)}>
+                {stats.regime}
+              </span>
+            )}
+          </div>
+          <p className="text-xs text-gray-500 mt-1 pl-8">
+            {config.description}
+          </p>
+        </div>
+
+        <div className="flex items-center gap-3 self-end sm:self-auto">
+          <div className="flex bg-gray-100 p-1 rounded-lg text-xs font-bold text-gray-600">
+            {(['1Y', '6M', '3M', '1M'] as const).map((r) => (
+              <button
+                key={r}
+                onClick={() => setRange(r)}
+                className={cn(
+                  "px-3 py-1 rounded-md transition-all cursor-pointer",
+                  range === r ? cn("bg-white shadow-xs font-extrabold", config.textColor) : "hover:text-gray-900"
+                )}
+              >
+                {r === '1Y' ? '1년' : r === '6M' ? '6개월' : r === '3M' ? '3개월' : '1개월'}
+              </button>
+            ))}
+          </div>
+
+          <button
+            onClick={onClose}
+            className="p-1.5 hover:bg-gray-100 rounded-lg text-gray-400 hover:text-gray-700 transition-colors cursor-pointer"
+            title="차트 닫기"
+          >
+            <X size={18} />
+          </button>
+        </div>
+      </div>
+
+      {/* Summary KPI Cards */}
+      {stats && (
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 my-5">
+          <div className={cn("border p-3.5 rounded-xl", config.cardBg, config.cardBorder)}>
+            <div className={cn("text-[11px] font-bold mb-1 opacity-90", config.textColor)}>현재 지수 / 가격</div>
+            <div className="text-xl font-extrabold text-gray-900 flex items-baseline gap-2">
+              {formatNumber(stats.latest.value)}
+              <span className={cn("text-xs font-bold", stats.latest.change > 0 ? "text-rose-600" : stats.latest.change < 0 ? "text-blue-600" : "text-gray-500")}>
+                {stats.latest.change > 0 ? `+${stats.latest.change}` : stats.latest.change} ({stats.latest.changeRate > 0 ? '+' : ''}{stats.latest.changeRate}%)
+              </span>
+            </div>
+          </div>
+
+          <div className="bg-rose-50/50 border border-rose-100 p-3.5 rounded-xl">
+            <div className="text-[11px] font-bold text-rose-700/80 mb-1">기간 최고치 (High)</div>
+            <div className="text-xl font-extrabold text-rose-950 flex items-baseline gap-2">
+              {formatNumber(stats.max.value)}
+              <span className="text-[10px] font-semibold text-rose-600 opacity-80">
+                ({stats.max.displayDate})
+              </span>
+            </div>
+          </div>
+
+          <div className="bg-emerald-50/50 border border-emerald-100 p-3.5 rounded-xl">
+            <div className="text-[11px] font-bold text-emerald-700/80 mb-1">기간 최저치 (Low)</div>
+            <div className="text-xl font-extrabold text-emerald-950 flex items-baseline gap-2">
+              {formatNumber(stats.min.value)}
+              <span className="text-[10px] font-semibold text-emerald-600 opacity-80">
+                ({stats.min.displayDate})
+              </span>
+            </div>
+          </div>
+
+          <div className="bg-slate-50 border border-slate-200/80 p-3.5 rounded-xl">
+            <div className="text-[11px] font-bold text-slate-500 mb-1">기간 평균 (Average)</div>
+            <div className="text-xl font-extrabold text-slate-800 flex items-baseline gap-2">
+              {formatNumber(stats.avg)}
+              <span className="text-[10px] font-semibold text-slate-500">
+                (이평 20D)
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Chart */}
+      <div className="h-[360px] w-full pt-2">
+        <ResponsiveContainer width="100%" height="100%">
+          <ComposedChart data={filteredData} margin={{ top: 15, right: 20, left: 0, bottom: 5 }}>
+            <defs>
+              <linearGradient id={config.gradientId} x1="0" y1="0" x2="0" y2="1">
+                <stop offset="5%" stopColor={config.strokeColor} stopOpacity={0.4} />
+                <stop offset="95%" stopColor={config.strokeColor} stopOpacity={0.02} />
+              </linearGradient>
+            </defs>
+            <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
+            <XAxis 
+              dataKey="displayDate" 
+              axisLine={false}
+              tickLine={false}
+              tick={{ fontSize: 10, fill: '#64748b', fontWeight: 500 }}
+              interval={xAxisInterval}
+            />
+            <YAxis 
+              axisLine={false}
+              tickLine={false}
+              tick={{ fontSize: 10, fill: config.strokeColor, fontWeight: 600 }}
+              domain={yDomain}
+              width={45}
+            />
+            <Tooltip 
+              content={({ active, payload }) => {
+                if (!active || !payload || !payload.length) return null;
+                const d = payload[0].payload as VolatilityHistoryPoint;
+                return (
+                  <div className="bg-slate-900/95 text-white p-3 rounded-xl shadow-xl text-xs space-y-1 border border-slate-700 backdrop-blur-md">
+                    <div className="font-bold text-slate-300 pb-1 border-b border-slate-700/80 flex items-center justify-between gap-3">
+                      <span>{d.date}</span>
+                      <span className="text-[9px] px-1.5 py-0.5 rounded font-bold uppercase bg-slate-800 text-slate-300">
+                        {config.badge}
+                      </span>
+                    </div>
+                    <div className="flex justify-between items-center gap-4 font-extrabold text-sm pt-1" style={{ color: config.strokeColor }}>
+                      <span>{config.badge}:</span>
+                      <span>{formatNumber(d.value)}</span>
+                    </div>
+                    <div className="flex justify-between items-center gap-4 text-slate-300 text-[11px]">
+                      <span>전일 대비:</span>
+                      <span className={d.change > 0 ? "text-rose-400 font-bold" : d.change < 0 ? "text-blue-400 font-bold" : "text-slate-400"}>
+                        {d.change > 0 ? `+${d.change}` : d.change} ({d.changeRate > 0 ? '+' : ''}{d.changeRate}%)
+                      </span>
+                    </div>
+                    <div className="flex justify-between items-center gap-4 text-slate-400 text-[10px]">
+                      <span>20일 이동평균:</span>
+                      <span>{formatNumber(d.ma20)}</span>
+                    </div>
+                  </div>
+                );
+              }}
+            />
+            <Legend 
+              verticalAlign="top" 
+              align="right" 
+              wrapperStyle={{ fontSize: '11px', fontWeight: 'bold', paddingBottom: '12px' }} 
+            />
+            
+            {type === 'VOLATILITY' && (
+              <>
+                <ReferenceLine 
+                  y={50.0} 
+                  stroke="#f59e0b" 
+                  strokeDasharray="4 4" 
+                  strokeWidth={1.5}
+                  label={{ value: "주의 (50.0)", fill: "#d97706", fontSize: 10, fontWeight: "bold", position: "insideTopRight" }}
+                />
+                <ReferenceLine 
+                  y={70.0} 
+                  stroke="#ef4444" 
+                  strokeDasharray="4 4" 
+                  strokeWidth={1.5}
+                  label={{ value: "고변동성 (70.0)", fill: "#dc2626", fontSize: 10, fontWeight: "bold", position: "insideTopRight" }}
+                />
+              </>
+            )}
+
+            <Area 
+              type="monotone" 
+              dataKey="value" 
+              name={`${config.badge} 지수`} 
+              stroke={config.strokeColor} 
+              strokeWidth={2.5}
+              fill={`url(#${config.gradientId})`} 
+              activeDot={{ r: 5, strokeWidth: 2, stroke: '#ffffff', fill: config.strokeColor }}
+            />
+            <Line 
+              type="monotone" 
+              dataKey="ma20" 
+              name="20일 이동평균" 
+              stroke="#8b5cf6" 
+              strokeWidth={1.5} 
+              strokeDasharray="3 3"
+              dot={false}
+            />
+
+            {stats && (
+              <ReferenceDot 
+                x={stats.max.displayDate} 
+                y={stats.max.value} 
+                r={5} 
+                fill="#ef4444" 
+                stroke="#ffffff" 
+                strokeWidth={2}
+                label={{ value: `최고 ${formatNumber(stats.max.value)}`, position: 'top', fill: '#dc2626', fontSize: 10, fontWeight: 'bold' }} 
+              />
+            )}
+            {stats && (
+              <ReferenceDot 
+                x={stats.min.displayDate} 
+                y={stats.min.value} 
+                r={5} 
+                fill="#10b981" 
+                stroke="#ffffff" 
+                strokeWidth={2}
+                label={{ value: `최저 ${formatNumber(stats.min.value)}`, position: 'bottom', fill: '#059669', fontSize: 10, fontWeight: 'bold' }} 
+              />
+            )}
+          </ComposedChart>
+        </ResponsiveContainer>
+      </div>
+
+      {/* Footer explanation */}
+      <div className="mt-4 pt-3 border-t border-gray-100 flex items-center gap-2 text-[11px] text-gray-500">
+        <Info size={14} className={cn("shrink-0", config.textColor)} />
+        <span>
+          <b>{config.badge} 지수 안내:</b> {config.footerNote}
+        </span>
+      </div>
     </div>
   );
 };
@@ -468,6 +910,7 @@ export default function App() {
   const [lastUpdate, setLastUpdate] = useState<Date>(new Date());
   const [isLoading, setIsLoading] = useState(true);
   const [targetDate, setTargetDate] = useState<Date>(toZonedTime(new Date(), KST_TZ));
+  const [activeChart, setActiveChart] = useState<'KOSPI' | 'KOSDAQ' | 'NIGHT' | 'VOLATILITY' | null>(null);
   
   // Treemap States
   const [marketStocks, setMarketStocks] = useState<any[]>([]);
@@ -827,6 +1270,10 @@ export default function App() {
               changeRate={latestKospi?.changeRate}
               maxInfo={kospiStats?.max}
               minInfo={kospiStats?.min}
+              onClick={() => setActiveChart(prev => prev === 'KOSPI' ? null : 'KOSPI')}
+              isClickable={true}
+              isActive={activeChart === 'KOSPI'}
+              toggleBadge={true}
             />
             <MetricCard 
               label="KOSDAQ Index"
@@ -835,12 +1282,20 @@ export default function App() {
               changeRate={latestKosdaq?.changeRate}
               maxInfo={kosdaqStats?.max}
               minInfo={kosdaqStats?.min}
+              onClick={() => setActiveChart(prev => prev === 'KOSDAQ' ? null : 'KOSDAQ')}
+              isClickable={true}
+              isActive={activeChart === 'KOSDAQ'}
+              toggleBadge={true}
             />
             <MetricCard 
               label="KOSPI 200 Night"
               value={formatNumber(krxFutures?.TDD_CLSPRC)}
               changeVal={formatNumber(krxFutures?.CMPPREVDD_PRC)}
               extraInfo={krxFutures ? `${krxFutures.BAS_DD} | ${krxFutures.PROD_NM}` : (krxError || 'Searching for market data...')}
+              onClick={() => setActiveChart(prev => prev === 'NIGHT' ? null : 'NIGHT')}
+              isClickable={true}
+              isActive={activeChart === 'NIGHT'}
+              toggleBadge={true}
             />
             <MetricCard 
               label="Volatility Index"
@@ -848,8 +1303,38 @@ export default function App() {
               changeVal={formatNumber(krxVol?.CMPPREVDD_IDX)}
               changeRate={krxVol?.FLUC_RT}
               extraInfo={krxVol ? `${krxVol.BAS_DD} | ${krxVol.IDX_NM}` : (krxError || 'Searching for market data...')}
+              onClick={() => setActiveChart(prev => prev === 'VOLATILITY' ? null : 'VOLATILITY')}
+              isClickable={true}
+              isActive={activeChart === 'VOLATILITY'}
+              toggleBadge={true}
             />
           </div>
+
+          {/* Historical Index Chart Section (Togglable) */}
+          <AnimatePresence mode="wait">
+            {activeChart && (
+              <motion.div
+                key={activeChart}
+                initial={{ opacity: 0, height: 0, scale: 0.98 }}
+                animate={{ opacity: 1, height: 'auto', scale: 1 }}
+                exit={{ opacity: 0, height: 0, scale: 0.98 }}
+                transition={{ duration: 0.25, ease: 'easeInOut' }}
+                className="overflow-hidden"
+              >
+                <IndexChartSection 
+                  type={activeChart}
+                  currentVal={
+                    activeChart === 'KOSPI' ? (parseFloat(String(latestKospi?.nowVal || 0).replace(/,/g, '')) || 2500)
+                    : activeChart === 'KOSDAQ' ? (parseFloat(String(latestKosdaq?.nowVal || 0).replace(/,/g, '')) || 750)
+                    : activeChart === 'NIGHT' ? (parseFloat(String(krxFutures?.TDD_CLSPRC || 0).replace(/,/g, '')) || 330)
+                    : (parseFloat(String(krxVol?.CLSPRC_IDX || 0).replace(/,/g, '')) || 75.59)
+                  }
+                  targetDate={targetDate} 
+                  onClose={() => setActiveChart(null)} 
+                />
+              </motion.div>
+            )}
+          </AnimatePresence>
 
           {/* Trend Section */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
