@@ -8,9 +8,11 @@ import { format, isSaturday, isSunday, addDays, subDays, setHours, setMinutes, s
 import { toZonedTime } from 'date-fns-tz';
 
 import { 
-  fetchNaverIndexData, fetchKRXData, getKSTDateStr, StockData, KRXRow, fetchNaverMarketStocks, MarketStockItem, generateVolatilityHistory, VolatilityHistoryPoint, fetchKRXVolatilityHistory, fetchIndexHistory, generateIndexHistory
+  fetchNaverIndexData, fetchKRXData, getKSTDateStr, StockData, KRXRow, fetchNaverMarketStocks, MarketStockItem, generateVolatilityHistory, VolatilityHistoryPoint, fetchKRXVolatilityHistory, fetchIndexHistory, generateIndexHistory, fetchRealtimeVKOSPI, RealtimeVKOSPI
 } from './stockService';
-import { cn, formatNumber, cleanValue, KOREAN_HOLIDAYS } from './lib/utils';
+import { cn, formatNumber, cleanValue, KOREAN_HOLIDAYS, TrendIntensity, getTrendIntensity } from './lib/utils';
+import { computeIntraday5MinTrend } from './lib/intradayTrend';
+import { IntradayTrendCard } from './components/IntradayTrendCard';
 
 const KST_TZ = 'Asia/Seoul';
 const KRX_OPEN = { hour: 9, minute: 0 };
@@ -323,27 +325,73 @@ const TreemapComponent = ({
 
 // --- Components ---
 
-const MetricCard = ({ label, value, changeVal, changeRate, extraInfo, maxInfo, minInfo, onClick, isClickable, isActive, toggleBadge }: any) => {
-  const isUp = parseFloat(String(changeVal).replace(/,/g, '')) > 0;
-  const isDown = parseFloat(String(changeVal).replace(/,/g, '')) < 0;
-  const color = isUp ? 'text-emerald-600' : isDown ? 'text-rose-600' : 'text-gray-500';
+const MetricCard = ({ 
+  label, 
+  value, 
+  changeVal, 
+  changeRate, 
+  extraInfo, 
+  maxInfo, 
+  minInfo, 
+  onClick, 
+  isClickable, 
+  isActive, 
+  toggleBadge, 
+  liveBadge, 
+  sourceText, 
+  subDetail,
+  isKoreanMode = true
+}: any) => {
+  const numericRate = useMemo(() => {
+    if (changeRate !== undefined && changeRate !== null && changeRate !== '') {
+      const clean = String(changeRate).replace(/[+%]/g, '').trim();
+      const n = parseFloat(clean);
+      if (!isNaN(n)) return n;
+    }
+    if (changeVal !== undefined && changeVal !== null && changeVal !== '') {
+      const n = parseFloat(String(changeVal).replace(/,/g, ''));
+      if (!isNaN(n)) return n > 0 ? 0.6 : n < 0 ? -0.6 : 0;
+    }
+    return 0;
+  }, [changeRate, changeVal]);
+
+  const intensity = useMemo(() => {
+    return getTrendIntensity(numericRate, isKoreanMode);
+  }, [numericRate, isKoreanMode]);
+
+  const isUp = intensity.direction === 'up';
+  const isDown = intensity.direction === 'down';
   const Icon = isUp ? ChevronUp : isDown ? ChevronDown : Minus;
 
   return (
     <div 
       onClick={onClick}
       className={cn(
-        "bg-white p-6 rounded-xl border border-gray-200 shadow-sm h-full flex flex-col justify-between transition-all duration-200 select-none",
+        "bg-white p-5 rounded-xl border border-gray-200 shadow-sm h-full flex flex-col justify-between transition-all duration-200 select-none relative overflow-hidden",
         isClickable && "cursor-pointer hover:border-amber-400 hover:shadow-md active:scale-[0.995]",
         isActive && "ring-2 ring-amber-500 border-amber-500 bg-amber-50/20"
       )}
     >
+      {/* Top Intensity Accent Indicator Bar */}
+      <div 
+        className="absolute top-0 left-0 right-0 h-[3px] transition-colors duration-300"
+        style={{ backgroundColor: intensity.hexColor }}
+      />
+
       <div>
-        <div className="flex items-center justify-between mb-1">
-          <div className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">{label}</div>
+        <div className="flex items-center justify-between mb-2 gap-1">
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">{label}</span>
+            {liveBadge && (
+              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                {liveBadge}
+              </span>
+            )}
+          </div>
           {toggleBadge && (
             <div className={cn(
-              "text-[10px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1 transition-all",
+              "text-[10px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1 transition-all whitespace-nowrap",
               isActive 
                 ? "bg-amber-500 text-white shadow-xs" 
                 : "bg-amber-100 text-amber-800 hover:bg-amber-200"
@@ -353,32 +401,58 @@ const MetricCard = ({ label, value, changeVal, changeRate, extraInfo, maxInfo, m
             </div>
           )}
         </div>
-        <div className="flex items-baseline gap-2">
+
+        <div className="flex items-baseline justify-between gap-2 flex-wrap">
           <div className="text-2xl font-bold text-gray-900 leading-none">{value}</div>
-          <div className={cn("text-xs font-semibold flex items-center gap-0.5", color)}>
-            <Icon size={12} strokeWidth={3} />
-            {changeVal} {changeRate ? `(${changeRate}%)` : ''}
+          
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <div className={cn("text-xs font-bold flex items-center gap-0.5", intensity.colorClass)}>
+              <Icon size={13} strokeWidth={3} />
+              <span>{changeVal}</span>
+              <span>{changeRate ? `(${changeRate}%)` : ''}</span>
+            </div>
+            
+            {/* Intuitive Degree Badge */}
+            <span 
+              className={cn("text-[9.5px] font-extrabold px-1.5 py-0.5 rounded-md border flex items-center gap-1", intensity.badgeClass)}
+              title={`${intensity.statusText} (${intensity.levelText})`}
+            >
+              <span>{intensity.label}</span>
+              <span className="opacity-75 text-[8.5px]">L{intensity.level}</span>
+            </span>
           </div>
         </div>
+
+        {subDetail && (
+          <div className="mt-1.5 text-[11px] font-medium text-slate-600 flex items-center gap-2 flex-wrap">
+            {subDetail}
+          </div>
+        )}
       </div>
       
-      {(maxInfo || minInfo || extraInfo) && (
-        <div className="mt-4 pt-3 border-t border-gray-100">
-          {extraInfo && <div className="text-[10px] text-gray-400 mb-2 truncate">{extraInfo}</div>}
-          <div className="flex justify-between text-[10px]">
-            {maxInfo && (
+      {(maxInfo || minInfo || extraInfo || sourceText) && (
+        <div className="mt-3 pt-2.5 border-t border-gray-100 flex flex-col gap-1.5">
+          {extraInfo && <div className="text-[10px] text-gray-500 truncate">{extraInfo}</div>}
+          <div className="flex justify-between items-center text-[10px]">
+            {maxInfo ? (
               <div className="text-gray-500">
-                <span className="text-emerald-600 font-bold mr-1">HI</span>
+                <span className={cn("font-bold mr-1", isKoreanMode ? "text-rose-600" : "text-emerald-600")}>HI</span>
                 {formatNumber(maxInfo.val)} <span className="opacity-50">({maxInfo.time})</span>
               </div>
-            )}
-            {minInfo && (
+            ) : <div />}
+            {minInfo ? (
               <div className="text-gray-500">
-                <span className="text-rose-600 font-bold mr-1">LO</span>
+                <span className={cn("font-bold mr-1", isKoreanMode ? "text-blue-600" : "text-rose-600")}>LO</span>
                 {formatNumber(minInfo.val)} <span className="opacity-50">({minInfo.time})</span>
               </div>
-            )}
+            ) : <div />}
           </div>
+          {sourceText && (
+            <div className="text-[9.5px] font-medium text-indigo-600 bg-indigo-50/70 border border-indigo-100/80 px-2 py-0.5 rounded flex items-center justify-between">
+              <span className="truncate">{sourceText}</span>
+              <span className="text-[8.5px] opacity-75 shrink-0 ml-1">실시간 연동</span>
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -427,20 +501,6 @@ const INDEX_CONFIG: Record<string, {
     cardBg: 'bg-emerald-50/50',
     cardBorder: 'border-emerald-100',
   },
-  NIGHT: {
-    title: '코스피 200 야간선물 (KOSPI 200 Night) 1년 추이',
-    badge: 'KOSPI 200 Night',
-    description: '코스피200 야간선물 - 정규장 마감 후 야간 파생상품 시장에서 거래되는 글로벌 선행 지수 추이입니다.',
-    footerNote: '야간선물 지수는 다음날 국내 정규장 개장(09:00) 시 시가 형성의 주요 선행 지표로 활용됩니다.',
-    borderColor: 'border-violet-400/80',
-    accentBg: 'bg-violet-600',
-    textColor: 'text-violet-700',
-    badgeStyle: 'text-violet-700 bg-violet-50 border-violet-200',
-    strokeColor: '#7c3aed',
-    gradientId: 'nightGradient',
-    cardBg: 'bg-violet-50/50',
-    cardBorder: 'border-violet-100',
-  },
   VOLATILITY: {
     title: '코스피 변동성 지수 (VKOSPI) 1년 추이',
     badge: 'VKOSPI',
@@ -457,7 +517,19 @@ const INDEX_CONFIG: Record<string, {
   },
 };
 
-const IndexChartSection = ({ type, currentVal, targetDate, onClose }: { type: 'KOSPI' | 'KOSDAQ' | 'NIGHT' | 'VOLATILITY'; currentVal: number; targetDate: Date; onClose: () => void }) => {
+const IndexChartSection = ({ 
+  type, 
+  currentVal, 
+  targetDate, 
+  onClose,
+  realtimeVol,
+}: { 
+  type: 'KOSPI' | 'KOSDAQ' | 'VOLATILITY'; 
+  currentVal: number; 
+  targetDate: Date; 
+  onClose: () => void;
+  realtimeVol?: RealtimeVKOSPI | null;
+}) => {
   const [range, setRange] = useState<'1Y' | '6M' | '3M' | '1M'>('1Y');
   const [realHistory, setRealHistory] = useState<VolatilityHistoryPoint[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
@@ -526,13 +598,14 @@ const IndexChartSection = ({ type, currentVal, targetDate, onClose }: { type: 'K
     let regimeColor = 'text-emerald-700 bg-emerald-50 border-emerald-200';
 
     if (type === 'VOLATILITY') {
-      if (latest.value < 30) {
+      const valToJudge = realtimeVol?.last ?? latest.value;
+      if (valToJudge < 30) {
         regime = '안정 (30 미만)';
         regimeColor = 'text-emerald-700 bg-emerald-50 border-emerald-200';
-      } else if (latest.value >= 70) {
+      } else if (valToJudge >= 70) {
         regime = '고변동성 (70 이상)';
         regimeColor = 'text-rose-700 bg-rose-50 border-rose-200';
-      } else if (latest.value >= 50) {
+      } else if (valToJudge >= 50) {
         regime = '주의 (50~70)';
         regimeColor = 'text-amber-700 bg-amber-50 border-amber-200';
       } else {
@@ -560,7 +633,7 @@ const IndexChartSection = ({ type, currentVal, targetDate, onClose }: { type: 'K
       regime,
       regimeColor,
     };
-  }, [type, filteredData]);
+  }, [type, filteredData, realtimeVol]);
 
   const yDomain = useMemo(() => {
     if (!stats) return [0, 100];
@@ -586,8 +659,14 @@ const IndexChartSection = ({ type, currentVal, targetDate, onClose }: { type: 'K
             <div className={cn("p-1.5 text-white rounded-lg shadow-sm", config.accentBg)}>
               <Activity size={18} />
             </div>
-            <h3 className="text-lg font-bold text-gray-900 tracking-tight">
+            <h3 className="text-lg font-bold text-gray-900 tracking-tight flex items-center gap-2">
               {config.title}
+              {type === 'VOLATILITY' && realtimeVol && (
+                <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                  실시간 {realtimeVol.source === 'KIS' ? '한국투자증권' : 'CNBC'}
+                </span>
+              )}
             </h3>
             {stats && (
               <span className={cn("text-xs font-bold px-2.5 py-0.5 rounded-full border shadow-2xs", stats.regimeColor)}>
@@ -630,12 +709,22 @@ const IndexChartSection = ({ type, currentVal, targetDate, onClose }: { type: 'K
       {stats && (
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 my-5">
           <div className={cn("border p-3.5 rounded-xl", config.cardBg, config.cardBorder)}>
-            <div className={cn("text-[11px] font-bold mb-1 opacity-90", config.textColor)}>현재 지수 / 가격</div>
+            <div className={cn("text-[11px] font-bold mb-1 opacity-90", config.textColor)}>
+              {type === 'VOLATILITY' && realtimeVol ? '실시간 VKOSPI 지수' : '현재 지수 / 가격'}
+            </div>
             <div className="text-xl font-extrabold text-gray-900 flex items-baseline gap-2">
-              {formatNumber(stats.latest.value)}
-              <span className={cn("text-xs font-bold", stats.latest.change > 0 ? "text-rose-600" : stats.latest.change < 0 ? "text-blue-600" : "text-gray-500")}>
-                {stats.latest.change > 0 ? `+${stats.latest.change}` : stats.latest.change} ({stats.latest.changeRate > 0 ? '+' : ''}{stats.latest.changeRate}%)
-              </span>
+              {type === 'VOLATILITY' && realtimeVol 
+                ? formatNumber(realtimeVol.last) 
+                : formatNumber(stats.latest.value)}
+              {type === 'VOLATILITY' && realtimeVol ? (
+                <span className={cn("text-xs font-bold", realtimeVol.change > 0 ? "text-rose-600" : realtimeVol.change < 0 ? "text-blue-600" : "text-gray-500")}>
+                  {realtimeVol.change > 0 ? `+${formatNumber(realtimeVol.change)}` : formatNumber(realtimeVol.change)} ({realtimeVol.changePct > 0 ? '+' : ''}{realtimeVol.changePct.toFixed(2)}%)
+                </span>
+              ) : (
+                <span className={cn("text-xs font-bold", stats.latest.change > 0 ? "text-rose-600" : stats.latest.change < 0 ? "text-blue-600" : "text-gray-500")}>
+                  {stats.latest.change > 0 ? `+${stats.latest.change}` : stats.latest.change} ({stats.latest.changeRate > 0 ? '+' : ''}{stats.latest.changeRate}%)
+                </span>
+              )}
             </div>
           </div>
 
@@ -649,11 +738,11 @@ const IndexChartSection = ({ type, currentVal, targetDate, onClose }: { type: 'K
             </div>
           </div>
 
-          <div className="bg-emerald-50/50 border border-emerald-100 p-3.5 rounded-xl">
-            <div className="text-[11px] font-bold text-emerald-700/80 mb-1">기간 최저치 (Low)</div>
-            <div className="text-xl font-extrabold text-emerald-950 flex items-baseline gap-2">
+          <div className="bg-blue-50/50 border border-blue-100 p-3.5 rounded-xl">
+            <div className="text-[11px] font-bold text-blue-700/80 mb-1">기간 최저치 (Low)</div>
+            <div className="text-xl font-extrabold text-blue-950 flex items-baseline gap-2">
               {formatNumber(stats.min.value)}
-              <span className="text-[10px] font-semibold text-emerald-600 opacity-80">
+              <span className="text-[10px] font-semibold text-blue-600 opacity-80">
                 ({stats.min.displayDate})
               </span>
             </div>
@@ -667,6 +756,36 @@ const IndexChartSection = ({ type, currentVal, targetDate, onClose }: { type: 'K
                 (이평 20D)
               </span>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Real-time VKOSPI Detail Strip */}
+      {type === 'VOLATILITY' && realtimeVol && (
+        <div className="mb-4 p-3 bg-amber-50/60 border border-amber-200/70 rounded-xl flex flex-wrap items-center justify-between gap-3 text-xs">
+          <div className="flex items-center gap-4 flex-wrap">
+            <span className="font-bold text-amber-900">당일 시세 상세:</span>
+            {realtimeVol.open !== null && (
+              <span className="text-gray-700">시가 <b className="text-gray-900">{formatNumber(realtimeVol.open)}</b></span>
+            )}
+            {realtimeVol.high !== null && (
+              <span className="text-gray-700">고가 <b className="text-rose-600">{formatNumber(realtimeVol.high)}</b></span>
+            )}
+            {realtimeVol.low !== null && (
+              <span className="text-gray-700">저가 <b className="text-blue-600">{formatNumber(realtimeVol.low)}</b></span>
+            )}
+            {realtimeVol.previousClose !== null && (
+              <span className="text-gray-700">전일종가 <b className="text-gray-900">{formatNumber(realtimeVol.previousClose)}</b></span>
+            )}
+            {realtimeVol.yearHigh !== null && (
+              <span className="text-gray-700">52주최고 <b className="text-rose-700">{formatNumber(realtimeVol.yearHigh)}</b></span>
+            )}
+            {realtimeVol.yearLow !== null && (
+              <span className="text-gray-700">52주최저 <b className="text-blue-700">{formatNumber(realtimeVol.yearLow)}</b></span>
+            )}
+          </div>
+          <div className="text-[11px] text-amber-800 font-medium ml-auto">
+            출처: <b>{realtimeVol.source === 'KIS' ? '한국투자증권 Open API (실전)' : 'CNBC 실시간 시세'}</b> · 갱신 {realtimeVol.lastTime}
           </div>
         </div>
       )}
@@ -786,10 +905,10 @@ const IndexChartSection = ({ type, currentVal, targetDate, onClose }: { type: 'K
                 x={stats.min.displayDate} 
                 y={stats.min.value} 
                 r={5} 
-                fill="#10b981" 
+                fill="#2563eb" 
                 stroke="#ffffff" 
                 strokeWidth={2}
-                label={{ value: `최저 ${formatNumber(stats.min.value)}`, position: 'bottom', fill: '#059669', fontSize: 10, fontWeight: 'bold' }} 
+                label={{ value: `최저 ${formatNumber(stats.min.value)}`, position: 'bottom', fill: '#1d4ed8', fontSize: 10, fontWeight: 'bold' }} 
               />
             )}
           </ComposedChart>
@@ -807,34 +926,164 @@ const IndexChartSection = ({ type, currentVal, targetDate, onClose }: { type: 'K
   );
 };
 
-const TrendCard = ({ label, direction, statusText, icon, changeValue, changeRate }: any) => {
-  const isUp = direction === 'up';
-  
-  const bgClass = isUp 
-    ? "bg-[linear-gradient(135deg,#ef4444_0%,#fb7185_100%)]" 
-    : direction === 'down'
-    ? "bg-[linear-gradient(135deg,#2563eb_0%,#38bdf8_100%)]" 
-    : "bg-[linear-gradient(135deg,#475569_0%,#94a3b8_100%)]";
+const TrendCard = ({ 
+  label, 
+  direction, 
+  statusText, 
+  icon, 
+  changeValue, 
+  changeRate, 
+  intensity,
+  first,
+  last,
+  timeRange
+}: any) => {
+  // If intensity is not provided directly, compute it
+  const trendIntensity: TrendIntensity = intensity || getTrendIntensity(changeRate, true);
 
   return (
     <div className={cn(
-      "relative overflow-hidden p-3 rounded-xl text-white shadow-md shadow-gray-200 isolation-auto",
-      bgClass
+      "relative overflow-hidden p-4 rounded-xl text-white shadow-md border transition-all duration-300 isolation-auto flex flex-col justify-between gap-3",
+      trendIntensity.gradientClass,
+      trendIntensity.borderClass
     )}>
       {/* Shine effect animation simulated with CSS in tailwind */}
-      <div className="absolute inset-0 w-1/4 h-[360%] bg-gradient-to-r from-white/0 via-white/15 to-white/0 -rotate-[18deg] -translate-x-[200%] animate-[trendShine_6.4s_linear_infinite] pointer-events-none z-0" />
+      <div className="absolute inset-0 w-1/4 h-[360%] bg-gradient-to-r from-white/0 via-white/20 to-white/0 -rotate-[18deg] -translate-x-[200%] animate-[trendShine_6.4s_linear_infinite] pointer-events-none z-0" />
       
-      <div className="relative z-10">
-        <div className="text-[10px] font-bold tracking-widest opacity-80 uppercase mb-1">{label}</div>
+      <div className="relative z-10 space-y-2.5">
+        {/* Top bar: Market Label + Intensity Tier Badge */}
         <div className="flex items-center justify-between gap-2">
-          <div className="text-sm font-extrabold flex items-center gap-1.5">
-            <span className="text-base">{icon}</span> {statusText}
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] font-black tracking-wider uppercase px-2 py-0.5 rounded bg-black/25 text-white/95 border border-white/15 backdrop-blur-xs">
+              {label}
+            </span>
+            <span className="text-[10px] text-white/80 font-medium">
+              {timeRange || '최근 30분 추세'}
+            </span>
           </div>
-          <div className="text-xs font-bold whitespace-nowrap">
-            {changeValue > 0 ? '+' : ''}{formatNumber(changeValue)} / {changeValue > 0 ? '+' : ''}{changeRate.toFixed(2)}%
+
+          <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-black/30 border border-white/20 backdrop-blur-xs text-[10px] font-extrabold text-white">
+            <span 
+              className={cn("w-1.5 h-1.5 rounded-full", trendIntensity.level >= 4 && "animate-ping")} 
+              style={{ backgroundColor: trendIntensity.hexColor === '#64748b' ? '#cbd5e1' : '#ffffff' }} 
+            />
+            <span>{trendIntensity.levelText}</span>
           </div>
         </div>
+
+        {/* Status Headline + Value / Rate */}
+        <div className="flex items-baseline justify-between gap-2 flex-wrap pt-0.5">
+          <div className="flex items-center gap-2">
+            <span className="text-xl leading-none">{trendIntensity.icon}</span>
+            <span className="text-base font-extrabold tracking-tight">{trendIntensity.statusText}</span>
+          </div>
+          <div className="text-right">
+            <div className="text-base font-extrabold tracking-tight">
+              {changeValue > 0 ? '+' : ''}{formatNumber(changeValue)} pt
+            </div>
+            <div className="text-xs font-semibold text-white/90">
+              {changeRate > 0 ? '+' : ''}{changeRate.toFixed(2)}%
+            </div>
+          </div>
+        </div>
+
+        {/* 5-Step Visual Intensity Meter */}
+        <div className="pt-2 border-t border-white/15">
+          <div className="flex items-center justify-between text-[10px] font-semibold text-white/85 mb-1.5">
+            <span className="flex items-center gap-1">
+              <span>추세 강도:</span>
+              <b className="font-extrabold text-white">{trendIntensity.label} ({trendIntensity.level}/5)</b>
+            </span>
+            <span className="text-[9.5px] text-white/75">
+              {trendIntensity.direction === 'up' ? `상승 탄력 ${trendIntensity.gaugePercent}%` : trendIntensity.direction === 'down' ? `하락 압력 ${trendIntensity.gaugePercent}%` : '중립'}
+            </span>
+          </div>
+          
+          {/* Segmented Meter Bar */}
+          <div className="grid grid-cols-5 gap-1 h-1.5">
+            {[1, 2, 3, 4, 5].map((step) => {
+              const isActive = step <= trendIntensity.level;
+              return (
+                <div 
+                  key={step} 
+                  className={cn(
+                    "h-full rounded-xs transition-all duration-300",
+                    isActive 
+                      ? "bg-white shadow-[0_0_6px_rgba(255,255,255,0.7)]" 
+                      : "bg-black/30 border border-white/10"
+                  )} 
+                />
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Context Description */}
+        <div className="p-2 rounded-lg bg-black/20 border border-white/10 text-[10.5px] leading-relaxed text-white/90 font-medium flex items-start gap-1.5">
+          <Info size={13} className="shrink-0 mt-0.5 opacity-80" />
+          <span>{trendIntensity.description}</span>
+        </div>
       </div>
+    </div>
+  );
+};
+
+const TrendIntensitySpectrum = ({ isKoreanMode = true }: { isKoreanMode?: boolean }) => {
+  const [isOpen, setIsOpen] = useState(false);
+  const tiers = [
+    { label: '급락', range: '≤ -2.0%', level: 5, bg: isKoreanMode ? 'bg-blue-900 text-white' : 'bg-red-900 text-white' },
+    { label: '강한 하락', range: '-1.2%~-2%', level: 4, bg: isKoreanMode ? 'bg-blue-700 text-white' : 'bg-red-600 text-white' },
+    { label: '하락세', range: '-0.5%~-1.2%', level: 3, bg: isKoreanMode ? 'bg-blue-500 text-white' : 'bg-rose-500 text-white' },
+    { label: '소폭 하락', range: '-0.15%~-0.5%', level: 2, bg: isKoreanMode ? 'bg-sky-400 text-white' : 'bg-rose-300 text-gray-900' },
+    { label: '보합', range: '±0.15%', level: 1, bg: 'bg-slate-400 text-white' },
+    { label: '소폭 상승', range: '+0.15%~+0.5%', level: 2, bg: isKoreanMode ? 'bg-rose-300 text-gray-900' : 'bg-emerald-400 text-white' },
+    { label: '상승세', range: '+0.5%~+1.2%', level: 3, bg: isKoreanMode ? 'bg-rose-500 text-white' : 'bg-emerald-600 text-white' },
+    { label: '강한 상승', range: '+1.2%~+2%', level: 4, bg: isKoreanMode ? 'bg-red-600 text-white' : 'bg-emerald-700 text-white' },
+    { label: '급등', range: '≥ +2.0%', level: 5, bg: isKoreanMode ? 'bg-red-800 text-white' : 'bg-emerald-900 text-white' },
+  ];
+
+  return (
+    <div className="bg-white px-3.5 py-2 rounded-lg border border-gray-200 text-xs shadow-2xs">
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <div className="flex items-center gap-2 flex-wrap">
+          <Activity size={12} className="text-gray-400" />
+          <span className="text-[11px] font-semibold text-gray-600">누적 bar 색상 강도 (9단계):</span>
+          <div className="flex items-center gap-1.5 text-[10px]">
+            <span className={cn("px-1.5 py-0.5 rounded font-bold", isKoreanMode ? "bg-blue-50 text-blue-700 border border-blue-200" : "bg-red-50 text-red-700 border border-red-200")}>
+              하락 (짙을수록 급락)
+            </span>
+            <span className="text-gray-300">◀</span>
+            <span className="px-1.5 py-0.5 rounded font-bold bg-gray-100 text-gray-600 border border-gray-200">
+              보합 (회색)
+            </span>
+            <span className="text-gray-300">▶</span>
+            <span className={cn("px-1.5 py-0.5 rounded font-bold", isKoreanMode ? "bg-rose-50 text-rose-700 border border-rose-200" : "bg-emerald-50 text-emerald-700 border border-emerald-200")}>
+              상승 (짙을수록 급등)
+            </span>
+          </div>
+        </div>
+
+        <button 
+          onClick={() => setIsOpen(!isOpen)}
+          className="text-[11px] text-gray-400 hover:text-gray-700 underline font-medium cursor-pointer"
+        >
+          {isOpen ? '색상표 접기' : '단계별 상세 색상표'}
+        </button>
+      </div>
+
+      {isOpen && (
+        <div className="grid grid-cols-3 sm:grid-cols-5 md:grid-cols-9 gap-1 pt-2.5 mt-2 border-t border-gray-100">
+          {tiers.map((t, idx) => (
+            <div 
+              key={idx} 
+              className={cn("p-1 rounded flex flex-col items-center justify-center text-center", t.bg)}
+            >
+              <div className="text-[9.5px] font-extrabold tracking-tight leading-tight">{t.label}</div>
+              <div className="text-[8px] opacity-90 font-medium">{t.range}</div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 };
@@ -904,13 +1153,13 @@ export default function App() {
   const [kospiData, setKospiData] = useState<any[]>([]);
   const [kosdaqData, setKosdaqData] = useState<any[]>([]);
   const [naverDate, setNaverDate] = useState<string | null>(null);
-  const [krxFutures, setKrxFutures] = useState<any>(null);
   const [krxVol, setKrxVol] = useState<any>(null);
+  const [realtimeVol, setRealtimeVol] = useState<RealtimeVKOSPI | null>(null);
   const [krxError, setKrxError] = useState<string | null>(null);
   const [lastUpdate, setLastUpdate] = useState<Date>(new Date());
   const [isLoading, setIsLoading] = useState(true);
   const [targetDate, setTargetDate] = useState<Date>(toZonedTime(new Date(), KST_TZ));
-  const [activeChart, setActiveChart] = useState<'KOSPI' | 'KOSDAQ' | 'NIGHT' | 'VOLATILITY' | null>(null);
+  const [activeChart, setActiveChart] = useState<'KOSPI' | 'KOSDAQ' | 'VOLATILITY' | null>(null);
   
   // Treemap States
   const [marketStocks, setMarketStocks] = useState<any[]>([]);
@@ -971,21 +1220,14 @@ export default function App() {
 
     const normalizeText = (text: string) => (text || '').replace(/\s+/g, '');
 
-    let futures: any[] = [];
     let vol: any[] = [];
     let successfulDate: string | null = null;
 
     for (const basDd of dateCandidates) {
-      const [fData, vData] = await Promise.all([
-        fetchKRXData('futures', basDd),
-        fetchKRXData('volatility', basDd)
-      ]);
-
-      const fRows = extractKrxRows(fData);
+      const vData = await fetchKRXData('volatility', basDd);
       const vRows = extractKrxRows(vData);
 
-      if (fRows.length > 0 || vRows.length > 0) {
-        futures = fRows;
+      if (vRows.length > 0) {
         vol = vRows;
         successfulDate = basDd;
         break;
@@ -995,22 +1237,6 @@ export default function App() {
     if (!successfulDate) {
       setKrxError("Failed to fetch KRX data. Please check your KRX_AUTH_KEY.");
     }
-
-    // Futures logic: Find night futures (KOSPI 200 Night)
-    if (futures.length > 0) {
-      const nightFutures = futures.find((row: any) => {
-        const prod = normalizeText(row.PROD_NM);
-        const mkt = normalizeText(row.MKT_NM);
-        
-        // User specifically requested to avoid "Mini" and match "KOSPI 200 F ... (Night)"
-        const isKospi200 = prod.includes('코스피200') && !prod.includes('미니');
-        const isFutures = prod.includes('F') || prod.includes('선물');
-        const isNight = prod.includes('야간') || mkt.includes('야간');
-        
-        return isKospi200 && isFutures && isNight;
-      });
-      setKrxFutures(nightFutures);
-    }
     
     // Volatility logic
     if (vol.length > 0) {
@@ -1019,6 +1245,16 @@ export default function App() {
         return name.includes('변동성');
       });
       setKrxVol(vIndex);
+    }
+
+    // Real-time VKOSPI fetching (KIS / Naver / CNBC)
+    try {
+      const liveVol = await fetchRealtimeVKOSPI();
+      if (liveVol) {
+        setRealtimeVol(liveVol);
+      }
+    } catch (e) {
+      console.warn('Realtime quotes fetch error:', e);
     }
 
     // Fetch Naver Market Stock list for Treemap
@@ -1048,12 +1284,25 @@ export default function App() {
     const isToday = format(targetDate, 'yyyy-MM-dd') === format(toZonedTime(new Date(), KST_TZ), 'yyyy-MM-dd');
     
     let interval: any;
+    let rtInterval: any;
+
     if (isToday) {
       interval = setInterval(() => fetchData(targetDate), 60000);
+      
+      // Fast polling dedicated to real-time VKOSPI
+      rtInterval = setInterval(async () => {
+        try {
+          const liveVol = await fetchRealtimeVKOSPI();
+          if (liveVol) setRealtimeVol(liveVol);
+        } catch {
+          // silent fallback
+        }
+      }, 5000);
     }
     
     return () => {
       if (interval) clearInterval(interval);
+      if (rtInterval) clearInterval(rtInterval);
     };
   }, [targetDate]);
 
@@ -1071,7 +1320,11 @@ export default function App() {
         time: timeStr,
         fullTime: time,
         KOSPI: cleanValue(k?.nowVal),
-        KOSDAQ: cleanValue(q?.nowVal)
+        KOSPI_change: cleanValue(k?.changeVal),
+        KOSPI_rate: cleanValue(k?.changeRate),
+        KOSDAQ: cleanValue(q?.nowVal),
+        KOSDAQ_change: cleanValue(q?.changeVal),
+        KOSDAQ_rate: cleanValue(q?.changeRate)
       };
     });
   }, [kospiData, kosdaqData]);
@@ -1117,6 +1370,37 @@ export default function App() {
   const latestKospi = kospiData[0];
   const latestKosdaq = kosdaqData[0];
 
+  // 5-Minute Intraday Cumulative Trend Summaries (09:00 ~ 15:30)
+  const kospiIntradayTrend = useMemo(() => {
+    const latestVal = cleanValue(latestKospi?.nowVal) ?? 2500;
+    const latestChange = cleanValue(latestKospi?.changeVal) ?? 12.5;
+    const latestRate = cleanValue(latestKospi?.changeRate) ?? 0.5;
+    return computeIntraday5MinTrend(
+      chartData, 
+      'KOSPI', 
+      'KOSPI', 
+      treemapColorMode === 'KR',
+      latestVal,
+      latestChange,
+      latestRate
+    );
+  }, [chartData, latestKospi, treemapColorMode]);
+
+  const kosdaqIntradayTrend = useMemo(() => {
+    const latestVal = cleanValue(latestKosdaq?.nowVal) ?? 750;
+    const latestChange = cleanValue(latestKosdaq?.changeVal) ?? 5.2;
+    const latestRate = cleanValue(latestKosdaq?.changeRate) ?? 0.7;
+    return computeIntraday5MinTrend(
+      chartData, 
+      'KOSDAQ', 
+      'KOSDAQ', 
+      treemapColorMode === 'KR',
+      latestVal,
+      latestChange,
+      latestRate
+    );
+  }, [chartData, latestKosdaq, treemapColorMode]);
+
   const calculateTrend = (data: any[], valKey: string, label: string) => {
     const validData = data.filter(d => d[valKey] !== null && d[valKey] !== undefined);
     if (validData.length < 2) return null;
@@ -1127,15 +1411,24 @@ export default function App() {
 
     const diff = last - first;
     const rate = first !== 0 ? (diff / first) * 100 : 0;
-    const direction = diff > 0 ? 'up' : diff < 0 ? 'down' : 'flat';
-    const statusText = diff > 0 ? '상승 추세' : diff < 0 ? '하락 추세' : '보합권';
-    const icon = diff > 0 ? '▲' : diff < 0 ? '▼' : '■';
+    const intensity = getTrendIntensity(rate, treemapColorMode === 'KR');
 
-    return { label, direction, statusText, icon, changeValue: diff, changeRate: rate };
+    return { 
+      label, 
+      valKey,
+      first,
+      last,
+      intensity, 
+      changeValue: diff, 
+      changeRate: rate,
+      direction: intensity.direction,
+      statusText: intensity.statusText,
+      icon: intensity.icon
+    };
   };
 
-  const kospiTrend = calculateTrend(chartData, 'KOSPI', 'KOSPI');
-  const kosdaqTrend = calculateTrend(chartData, 'KOSDAQ', 'KOSDAQ');
+  const kospiTrend = calculateTrend(chartData, 'KOSPI', 'KOSPI 지수 추세');
+  const kosdaqTrend = calculateTrend(chartData, 'KOSDAQ', 'KOSDAQ 지수 추세');
 
   const thirtyMinTicks = useMemo(() => {
     const ticks = [];
@@ -1262,7 +1555,7 @@ export default function App() {
         <div className="p-8 space-y-6 flex-1 overflow-y-auto custom-scrollbar">
           
           {/* Metrics Grid */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 shrink-0">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6 shrink-0">
             <MetricCard 
               label="KOSPI Index"
               value={formatNumber(latestKospi?.nowVal)}
@@ -1274,6 +1567,7 @@ export default function App() {
               isClickable={true}
               isActive={activeChart === 'KOSPI'}
               toggleBadge={true}
+              isKoreanMode={treemapColorMode === 'KR'}
             />
             <MetricCard 
               label="KOSDAQ Index"
@@ -1286,27 +1580,59 @@ export default function App() {
               isClickable={true}
               isActive={activeChart === 'KOSDAQ'}
               toggleBadge={true}
-            />
-            <MetricCard 
-              label="KOSPI 200 Night"
-              value={formatNumber(krxFutures?.TDD_CLSPRC)}
-              changeVal={formatNumber(krxFutures?.CMPPREVDD_PRC)}
-              extraInfo={krxFutures ? `${krxFutures.BAS_DD} | ${krxFutures.PROD_NM}` : (krxError || 'Searching for market data...')}
-              onClick={() => setActiveChart(prev => prev === 'NIGHT' ? null : 'NIGHT')}
-              isClickable={true}
-              isActive={activeChart === 'NIGHT'}
-              toggleBadge={true}
+              isKoreanMode={treemapColorMode === 'KR'}
             />
             <MetricCard 
               label="Volatility Index"
-              value={formatNumber(krxVol?.CLSPRC_IDX)}
-              changeVal={formatNumber(krxVol?.CMPPREVDD_IDX)}
-              changeRate={krxVol?.FLUC_RT}
-              extraInfo={krxVol ? `${krxVol.BAS_DD} | ${krxVol.IDX_NM}` : (krxError || 'Searching for market data...')}
+              value={
+                realtimeVol 
+                  ? formatNumber(realtimeVol.last) 
+                  : formatNumber(krxVol?.CLSPRC_IDX)
+              }
+              changeVal={
+                realtimeVol 
+                  ? (realtimeVol.change > 0 ? `+${formatNumber(realtimeVol.change)}` : formatNumber(realtimeVol.change)) 
+                  : formatNumber(krxVol?.CMPPREVDD_IDX)
+              }
+              changeRate={
+                realtimeVol 
+                  ? (realtimeVol.changePct > 0 ? `+${realtimeVol.changePct.toFixed(2)}` : realtimeVol.changePct.toFixed(2)) 
+                  : krxVol?.FLUC_RT
+              }
+              liveBadge={realtimeVol ? (realtimeVol.source === 'KIS' ? '실시간(KIS)' : '실시간') : undefined}
+              subDetail={
+                realtimeVol ? (
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <span className="font-semibold text-rose-700 bg-rose-50 border border-rose-100 px-1 py-0.5 rounded text-[9.5px]">
+                      VKOSPI 변동성 지수
+                    </span>
+                    {realtimeVol.yearHigh && realtimeVol.yearLow && (
+                      <span className="text-[10px] text-slate-500">
+                        52주 <b className="text-slate-700 font-semibold">{formatNumber(realtimeVol.yearLow)}~{formatNumber(realtimeVol.yearHigh)}</b>
+                      </span>
+                    )}
+                  </div>
+                ) : undefined
+              }
+              extraInfo={
+                realtimeVol 
+                  ? `${realtimeVol.lastTime} | ${realtimeVol.name || 'VKOSPI'} (코드: ${realtimeVol.symbol})` 
+                  : krxVol 
+                    ? `${krxVol.BAS_DD} | ${krxVol.IDX_NM}` 
+                    : (krxError || 'Searching for market data...')
+              }
+              sourceText={
+                realtimeVol?.source === 'KIS' 
+                  ? '출처: 한국투자증권(KIS) Open API 실시간' 
+                  : (realtimeVol?.source === 'CNBC' ? '출처: CNBC Realtime Quote' : '출처: 한국거래소(KRX) 공식 데이터')
+              }
+              maxInfo={realtimeVol?.high ? { val: realtimeVol.high, time: '당일고가' } : undefined}
+              minInfo={realtimeVol?.low ? { val: realtimeVol.low, time: '당일저가' } : undefined}
               onClick={() => setActiveChart(prev => prev === 'VOLATILITY' ? null : 'VOLATILITY')}
               isClickable={true}
               isActive={activeChart === 'VOLATILITY'}
               toggleBadge={true}
+              isKoreanMode={treemapColorMode === 'KR'}
             />
           </div>
 
@@ -1326,30 +1652,55 @@ export default function App() {
                   currentVal={
                     activeChart === 'KOSPI' ? (parseFloat(String(latestKospi?.nowVal || 0).replace(/,/g, '')) || 2500)
                     : activeChart === 'KOSDAQ' ? (parseFloat(String(latestKosdaq?.nowVal || 0).replace(/,/g, '')) || 750)
-                    : activeChart === 'NIGHT' ? (parseFloat(String(krxFutures?.TDD_CLSPRC || 0).replace(/,/g, '')) || 330)
-                    : (parseFloat(String(krxVol?.CLSPRC_IDX || 0).replace(/,/g, '')) || 75.59)
+                    : (realtimeVol?.last ?? (parseFloat(String(krxVol?.CLSPRC_IDX || 0).replace(/,/g, '')) || 75.59))
                   }
                   targetDate={targetDate} 
                   onClose={() => setActiveChart(null)} 
+                  realtimeVol={activeChart === 'VOLATILITY' ? realtimeVol : undefined}
                 />
               </motion.div>
             )}
           </AnimatePresence>
 
-          {/* Trend Section */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            {kospiTrend && <TrendCard {...kospiTrend} />}
-            {kosdaqTrend && <TrendCard {...kosdaqTrend} />}
+          {/* Trend Section with Magnitude and Color Spectrum */}
+          <div className="space-y-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+              <IntradayTrendCard summary={kospiIntradayTrend} isKoreanMode={treemapColorMode === 'KR'} />
+              <IntradayTrendCard summary={kosdaqIntradayTrend} isKoreanMode={treemapColorMode === 'KR'} />
+            </div>
+            <TrendIntensitySpectrum isKoreanMode={treemapColorMode === 'KR'} />
           </div>
 
           {/* Chart Section */}
           <div className="bg-white border border-gray-200 rounded-xl p-8 flex flex-col shadow-sm">
-            <div className="flex justify-between items-center mb-8">
-              <h3 className="font-bold text-gray-700 flex items-center gap-2">
-                <div className="w-1.5 h-1.5 rounded-full bg-blue-600" />
-                Live Index Velocity
-              </h3>
-              <div className="flex gap-2">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
+              <div>
+                <h3 className="font-bold text-gray-800 flex items-center gap-2 text-base">
+                  <div className="w-2 h-2 rounded-full bg-blue-600 animate-pulse" />
+                  Live Index Velocity (실시간 지수 모멘텀)
+                </h3>
+                <div className="flex items-center gap-2 mt-2 flex-wrap">
+                  {latestKospi && (() => {
+                    const kospiInt = getTrendIntensity(latestKospi.changeRate, treemapColorMode === 'KR');
+                    return (
+                      <span className={cn("text-[10px] font-bold px-2 py-0.5 rounded-md border flex items-center gap-1.5 shadow-2xs", kospiInt.badgeClass)}>
+                        <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: kospiInt.hexColor }} />
+                        <span>KOSPI {formatNumber(latestKospi.nowVal)} ({latestKospi.changeRate}% {kospiInt.label})</span>
+                      </span>
+                    );
+                  })()}
+                  {latestKosdaq && (() => {
+                    const kosdaqInt = getTrendIntensity(latestKosdaq.changeRate, treemapColorMode === 'KR');
+                    return (
+                      <span className={cn("text-[10px] font-bold px-2 py-0.5 rounded-md border flex items-center gap-1.5 shadow-2xs", kosdaqInt.badgeClass)}>
+                        <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: kosdaqInt.hexColor }} />
+                        <span>KOSDAQ {formatNumber(latestKosdaq.nowVal)} ({latestKosdaq.changeRate}% {kosdaqInt.label})</span>
+                      </span>
+                    );
+                  })()}
+                </div>
+              </div>
+              <div className="flex gap-2 shrink-0">
                 <div className="px-3 py-1.5 text-[10px] font-bold border rounded-md bg-white text-gray-500 shadow-xs uppercase tracking-widest">Minutely</div>
                 <div className="px-3 py-1.5 text-[10px] font-bold border rounded-md bg-blue-50 text-blue-600 border-blue-200 shadow-xs uppercase tracking-widest">Real-time</div>
               </div>

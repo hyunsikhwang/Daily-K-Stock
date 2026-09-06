@@ -35,6 +35,37 @@ export interface KRXRow {
   FLUC_RT?: string;
 }
 
+export interface RealtimeVKOSPI {
+  last: number;
+  change: number;
+  changePct: number;
+  open: number | null;
+  high: number | null;
+  low: number | null;
+  previousClose: number | null;
+  yearHigh: number | null;
+  yearLow: number | null;
+  exchange: string;
+  marketStatus: string;
+  lastTime: string;
+  name: string;
+  symbol: string;
+  source: 'KIS' | 'CNBC' | 'KRX' | 'FALLBACK';
+  fetchedAt: string;
+  isRealtime: boolean;
+}
+
+
+export const fetchRealtimeVKOSPI = async (): Promise<RealtimeVKOSPI | null> => {
+  try {
+    const response = await axios.get('/api/stock/vkospi/realtime');
+    return response.data || null;
+  } catch (error) {
+    console.error('Error fetching real-time VKOSPI:', error);
+    return null;
+  }
+};
+
 export const fetchNaverIndexData = async (indexType: 'KOSPI' | 'KOSDAQ', dateStr: string): Promise<StockData[]> => {
   try {
     const response = await axios.get('/api/stock/naver', {
@@ -114,7 +145,6 @@ export const generateIndexHistory = (type: string = 'VOLATILITY', currentVal: nu
   // Baseline defaults if currentVal not provided
   let defaultVal = 6258.77;
   if (type.toUpperCase() === 'KOSDAQ') defaultVal = 798.81;
-  if (type.toUpperCase() === 'NIGHT') defaultVal = 995.40;
 
   const baseVal = currentVal > 0 ? currentVal : defaultVal;
   const points: VolatilityHistoryPoint[] = [];

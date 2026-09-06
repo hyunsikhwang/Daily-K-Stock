@@ -4,12 +4,24 @@ import axios from "axios";
 import path from "path";
 import dotenv from "dotenv";
 import { getKRXVolatilityHistoryPoints, syncKRXDate, getTradingDays } from "./src/krxVolatilityService.js";
+import { getVKOSPIRealtime } from "./src/vkospiRealtimeService.js";
 
 dotenv.config();
 
 async function startServer() {
   const app = express();
   const PORT = 3000;
+
+  // Realtime VKOSPI (Korea Investment Open API + CNBC Quote Fallback)
+  app.get("/api/stock/vkospi/realtime", async (req, res) => {
+    try {
+      const quote = await getVKOSPIRealtime(req.query.refresh === "true");
+      res.json(quote);
+    } catch (error: any) {
+      console.error("Error fetching real-time VKOSPI:", error.message);
+      res.status(500).json({ error: "Failed to fetch real-time VKOSPI", details: error.message });
+    }
+  });
 
   // Proxy for Naver Finance API (CORS issue in browser)
   app.get("/api/stock/naver", async (req, res) => {
@@ -60,55 +72,57 @@ async function startServer() {
     const type = String(req.query.type || "VOLATILITY").toUpperCase();
     try {
       if (type === "VOLATILITY") {
-        const authKey = process.env.KRX_AUTH_KEY;
-        if (authKey && authKey !== "YOUR_KRX_API_KEY") {
-          const recentDays = getTradingDays(3);
-          for (const dateStr of recentDays) {
-            await syncKRXDate(dateStr, authKey);
-            await new Promise(resolve => setTimeout(resolve, 50));
+        let latestRealtimeVal: number | undefined;
+        try {
+          const rt = await getVKOSPIRealtime();
+          if (rt && rt.last > 0) {
+            latestRealtimeVal = rt.last;
           }
+        } catch (e) {
+          // ignore
         }
-        const history = getKRXVolatilityHistoryPoints();
+        const history = getKRXVolatilityHistoryPoints(latestRealtimeVal);
         return res.json(history);
       }
 
-      // Handle KOSPI, KOSDAQ, and NIGHT via Yahoo Finance API with calculation
-      let sym = "^KS11";
-      if (type === "KOSDAQ") sym = "^KQ11";
+      // Handle KOSPI, KOSDAQ via high-accuracy Naver Finance Daily Chart API
+      let naverSymbol = "KOSPI";
+      if (type === "KOSDAQ") naverSymbol = "KOSDAQ";
 
-      const yahooUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${sym}?range=1y&interval=1d`;
-      const response = await axios.get(yahooUrl, {
+      const naverUrl = `https://fchart.stock.naver.com/sise.nhn?symbol=${naverSymbol}&timeframe=day&count=260&requestType=0`;
+      const response = await axios.get(naverUrl, {
         headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
         },
         timeout: 10000
       });
 
-      const result = response.data?.chart?.result?.[0];
-      const timestamps: number[] = result?.timestamp || [];
-      const quotes: (number | null)[] = result?.indicators?.quote?.[0]?.close || [];
+      const rawXml = String(response.data || "");
+      const matches = [...rawXml.matchAll(/<item data="([^"]+)"/g)];
+
+      if (!matches || matches.length === 0) {
+        throw new Error(`Failed to parse Naver chart XML for ${naverSymbol}`);
+      }
 
       const points: any[] = [];
       const rawValues: number[] = [];
 
-      // Night futures ratio relative to KOSPI baseline (approx ~995.40 / 6258.77)
-      const scaleFactor = type === "NIGHT" ? (995.40 / 6258.77) : 1.0;
+      for (let i = 0; i < matches.length; i++) {
+        const parts = matches[i][1].split("|");
+        const dateStr = parts[0]; // YYYYMMDD
+        const close = parseFloat(parts[4]);
 
-      for (let i = 0; i < timestamps.length; i++) {
-        const rawVal = quotes[i];
-        if (rawVal !== null && rawVal !== undefined && !isNaN(rawVal)) {
-          const val = Math.round((rawVal * scaleFactor) * 100) / 100;
-          rawValues.push(val);
+        if (!isNaN(close) && close > 0) {
+          rawValues.push(close);
 
-          const d = new Date(timestamps[i] * 1000);
-          const yyyy = d.getFullYear();
-          const mm = String(d.getMonth() + 1).padStart(2, '0');
-          const dd = String(d.getDate()).padStart(2, '0');
-          const dateStr = `${yyyy}-${mm}-${dd}`;
-          const displayDate = `${String(yyyy).slice(2)}.${mm}.${dd}`;
+          const yyyy = dateStr.slice(0, 4);
+          const mm = dateStr.slice(4, 6);
+          const dd = dateStr.slice(6, 8);
+          const formattedDate = `${yyyy}-${mm}-${dd}`;
+          const displayDate = `${yyyy.slice(2)}.${mm}.${dd}`;
 
-          const prevVal = rawValues.length > 1 ? rawValues[rawValues.length - 2] : val;
-          const change = Math.round((val - prevVal) * 100) / 100;
+          const prevVal = rawValues.length > 1 ? rawValues[rawValues.length - 2] : close;
+          const change = Math.round((close - prevVal) * 100) / 100;
           const changeRate = prevVal > 0 ? Math.round((change / prevVal) * 10000) / 100 : 0;
 
           const maStart = Math.max(0, rawValues.length - 20);
@@ -116,9 +130,9 @@ async function startServer() {
           const ma20 = Math.round((maSlice.reduce((a, b) => a + b, 0) / maSlice.length) * 100) / 100;
 
           points.push({
-            date: dateStr,
+            date: formattedDate,
             displayDate,
-            value: val,
+            value: close,
             change,
             changeRate,
             ma20
@@ -139,15 +153,16 @@ async function startServer() {
   // Dedicated 1-Year KRX Volatility Index History Route (legacy compatibility)
   app.get("/api/stock/krx/volatility/history", async (req, res) => {
     try {
-      const authKey = process.env.KRX_AUTH_KEY;
-      if (authKey && authKey !== "YOUR_KRX_API_KEY") {
-        const recentDays = getTradingDays(3);
-        for (const dateStr of recentDays) {
-          await syncKRXDate(dateStr, authKey);
-          await new Promise(resolve => setTimeout(resolve, 50));
+      let latestRealtimeVal: number | undefined;
+      try {
+        const rt = await getVKOSPIRealtime();
+        if (rt && rt.last > 0) {
+          latestRealtimeVal = rt.last;
         }
+      } catch (e) {
+        // ignore
       }
-      const history = getKRXVolatilityHistoryPoints();
+      const history = getKRXVolatilityHistoryPoints(latestRealtimeVal);
       res.json(history);
     } catch (error: any) {
       console.error("Error generating KRX volatility history:", error.message);
@@ -160,6 +175,31 @@ async function startServer() {
     const { type } = req.params; // 'futures' or 'volatility'
     const { basDd } = req.query;
     const authKey = process.env.KRX_AUTH_KEY;
+
+    if (type === 'volatility' && (!authKey || authKey === "YOUR_KRX_API_KEY")) {
+      try {
+        const realtime = await getVKOSPIRealtime();
+        const dateStr = String(basDd || new Date().toISOString().slice(0, 10).replace(/-/g, ''));
+        return res.json({
+          OutBlock_1: [
+            {
+              BAS_DD: dateStr,
+              IDX_NM: "코스피 200 변동성지수",
+              CLSPRC_IDX: String(realtime.last),
+              CMPPREVDD_IDX: String(realtime.change),
+              FLUC_RT: String(realtime.changePct),
+              OPNPRC_IDX: String(realtime.open ?? realtime.last),
+              HGPRC_IDX: String(realtime.high ?? realtime.last),
+              LWPRC_IDX: String(realtime.low ?? realtime.last),
+              SOURCE: realtime.source,
+            }
+          ],
+          realtime
+        });
+      } catch (realtimeErr: any) {
+        console.warn("Realtime fallback failed in /api/stock/krx/volatility:", realtimeErr.message);
+      }
+    }
 
     if (!authKey || authKey === "YOUR_KRX_API_KEY") {
       return res.status(500).json({ 

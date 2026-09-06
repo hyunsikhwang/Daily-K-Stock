@@ -2,5 +2,7 @@
   "name": "Daily K-Stock Dashboard",
   "description": "Real-time insights and analysis of the Korean stock market (KOSPI & KOSDAQ).",
   "requestFramePermissions": [],
-  "majorCapabilities": []
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }
